@@ -9,7 +9,12 @@ pub struct HookContext {
     pub transcript_path: PathBuf,
     pub cwd: PathBuf,
     pub hook_event_name: HookEvent,
+    /// Present on tool-use events; absent on session-level events like
+    /// SubagentStop. Default to empty string so the same struct deserializes
+    /// for both.
+    #[serde(default)]
     pub tool_name: String,
+    #[serde(default)]
     pub tool_use_id: String,
     #[serde(default)]
     pub permission_mode: Option<String>,
@@ -89,6 +94,30 @@ mod tests {
         assert!(ctx.agent_id.is_none());
         assert!(ctx.agent_type.is_none());
         assert_eq!(ctx.agent_key(), "main");
+    }
+
+    /// SubagentStop is a session-level event — its payload has agent_id and
+    /// agent_type but NO tool_name or tool_use_id (it's not a tool call).
+    /// Earlier the struct required tool_name/tool_use_id, so deserialization
+    /// silently failed and the destruction signal was dropped on the floor.
+    /// This payload must round-trip cleanly so SubagentStop hooks land.
+    const SUBAGENT_STOP_PAYLOAD: &str = r#"{
+        "session_id": "abc",
+        "transcript_path": "/t",
+        "cwd": "/c",
+        "hook_event_name": "SubagentStop",
+        "agent_id": "subagent-xyz",
+        "agent_type": "general-purpose"
+    }"#;
+
+    #[test]
+    fn deserializes_subagent_stop_payload() {
+        let ctx: HookContext = serde_json::from_str(SUBAGENT_STOP_PAYLOAD).unwrap();
+        assert_eq!(ctx.hook_event_name, HookEvent::SubagentStop);
+        assert_eq!(ctx.agent_id.as_deref(), Some("subagent-xyz"));
+        assert_eq!(ctx.agent_key(), "subagent-xyz");
+        assert_eq!(ctx.tool_name, "");
+        assert_eq!(ctx.tool_use_id, "");
     }
 
     #[test]
