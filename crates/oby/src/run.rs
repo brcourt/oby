@@ -59,7 +59,18 @@ async fn run_async(rest: Vec<String>, socket_dir: PathBuf) -> Result<()> {
     // staying in the main buffer here, claude's alt-screen entry is the
     // primary one and the terminal preserves scrollback as if you ran claude
     // unwrapped. We enter alt-screen only when toggling to the feed view.
-    execute!(std::io::stdout(), EnableBracketedPaste)?;
+    //
+    // Clear the visible screen + home the cursor so claude paints onto a
+    // clean canvas instead of over the shell's prompt + history. Uses
+    // ClearType::All (\x1b[2J) which preserves terminal scrollback in
+    // modern terminals — the user can still scroll up to see whatever was
+    // on screen before they ran `oby claude`.
+    execute!(
+        std::io::stdout(),
+        EnableBracketedPaste,
+        crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
+        crossterm::cursor::MoveTo(0, 0),
+    )?;
     let _term_guard = TerminalGuard;
     let backend = ratatui::backend::CrosstermBackend::new(std::io::stdout());
     let mut term = ratatui::Terminal::new(backend)?;
