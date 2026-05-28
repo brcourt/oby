@@ -1,3 +1,4 @@
+pub mod rewrite;
 pub mod scanner;
 pub mod shell;
 
@@ -68,9 +69,19 @@ impl Capturer for BashCapturer {
         })
     }
 
-    fn pre_rewrite(&self, _ctx: &HookContext, _input: &Value) -> RewriteDecision {
-        // Filled in by Epic 5.
-        RewriteDecision::Passthrough
+    fn pre_rewrite(&self, ctx: &HookContext, input: &Value) -> RewriteDecision {
+        let parsed: BashInput = match serde_json::from_value(input.clone()) {
+            Ok(p) => p,
+            Err(_) => return RewriteDecision::Passthrough,
+        };
+        match rewrite::rewrite(&parsed.command, ctx.agent_key(), &ctx.tool_use_id) {
+            Some(new_cmd) => {
+                let mut new_input = input.clone();
+                new_input["command"] = Value::String(new_cmd);
+                RewriteDecision::Rewrite(new_input)
+            }
+            None => RewriteDecision::Passthrough,
+        }
     }
 }
 
