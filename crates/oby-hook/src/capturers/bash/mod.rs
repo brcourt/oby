@@ -1,3 +1,4 @@
+pub mod scanner;
 pub mod shell;
 
 use oby_core::{
