@@ -6,7 +6,7 @@ A wrapper (`alias claude="oby claude"`) owns your terminal; a hotkey toggles bet
 
 ## Status
 
-**Design phase.** Architecture is documented in [`docs/architecture.md`](docs/architecture.md). Implementation has not started — the design has been empirically verified against Claude Code `2.1.142` (see Appendix A of the architecture doc), but no code lives here yet.
+**Working PoC.** v0.1 ships Bash + Read capturers + `2>/dev/null` discard-recovery; see [`docs/plans/v0.1.md`](docs/plans/v0.1.md) for the implementation plan. Architecture documented in [`docs/architecture.md`](docs/architecture.md); design verified against Claude Code `2.1.142` (see Appendix A).
 
 ## How it works (briefly)
 
@@ -15,6 +15,21 @@ A wrapper (`alias claude="oby claude"`) owns your terminal; a hotkey toggles bet
 - The harness-injected `agent_id` field routes each subagent's commands to its own stream. Main agent and concurrent subagents stay cleanly separated.
 - The wrapper owns the terminal: claude in one view, the activity feed in the other, one hotkey to swap.
 - A small plugin trait (`Capturer`) lets each observed tool — Bash, Read, Edit, Grep, Task, … — declare its own renderer in one file in the source tree. Adding a new capturer is one PR + one line in the registry.
+
+## Install (development build, v0.1)
+
+```bash
+git clone https://github.com/brcourt/oby
+cd oby
+cargo build --release
+export PATH="$PWD/target/release:$PATH"
+oby install              # writes hook config into ~/.claude/settings.json
+oby claude               # launches claude inside the obi wrapper
+```
+
+Press **Ctrl-G** at any time to toggle between the claude session and the activity feed. In the feed: ←/→ switches between agents (main + each subagent), `q` quits, Ctrl-G goes back to claude.
+
+Run plain `claude` (no wrapper) for an unobserved session — the hook env-gates itself and no-ops.
 
 ## Non-goals (for now)
 
