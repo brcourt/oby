@@ -5,7 +5,7 @@ use crate::sockets::spawn_listeners;
 use crate::tui::{render, FeedView};
 use anyhow::Result;
 use crossterm::{
-    event::{self, Event},
+    event::{self, DisableBracketedPaste, EnableBracketedPaste, Event},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -52,7 +52,11 @@ async fn run_async(rest: Vec<String>, socket_dir: PathBuf) -> Result<()> {
 
     let (cols, rows) = crossterm::terminal::size()?;
     enable_raw_mode()?;
-    execute!(std::io::stdout(), EnterAlternateScreen)?;
+    execute!(
+        std::io::stdout(),
+        EnterAlternateScreen,
+        EnableBracketedPaste
+    )?;
     let _term_guard = TerminalGuard;
     let backend = ratatui::backend::CrosstermBackend::new(std::io::stdout());
     let mut term = ratatui::Terminal::new(backend)?;
@@ -94,8 +98,19 @@ async fn run_async(rest: Vec<String>, socket_dir: PathBuf) -> Result<()> {
         }
 
         if event::poll(Duration::from_millis(33))? {
-            if let Event::Key(key) = event::read()? {
-                match decide(key, current) {
+            match event::read()? {
+                Event::Paste(text) if current == ViewState::Claude => {
+                    // Forward pasted text to claude wrapped in bracketed-paste markers,
+                    // so claude's own input handler treats it as a single paste rather
+                    // than character-by-character keystrokes (which can trigger autocomplete
+                    // or multi-line input quirks).
+                    master_writer.write_all(b"\x1b[200~")?;
+                    master_writer.write_all(text.as_bytes())?;
+                    master_writer.write_all(b"\x1b[201~")?;
+                    master_writer.flush()?;
+                }
+                Event::Paste(_) => {}
+                Event::Key(key) => match decide(key, current) {
                     InputDecision::ToggleView => {
                         let new_state = current.toggle();
                         *view_state.lock().unwrap() = new_state;
@@ -143,7 +158,8 @@ async fn run_async(rest: Vec<String>, socket_dir: PathBuf) -> Result<()> {
                         FeedNav::Quit => break,
                         FeedNav::ScrollUp | FeedNav::ScrollDown => {}
                     },
-                }
+                },
+                _ => {}
             }
         }
     }
@@ -168,8 +184,12 @@ impl Drop for SocketDirCleanup {
 struct TerminalGuard;
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
+        let _ = execute!(
+            std::io::stdout(),
+            DisableBracketedPaste,
+            LeaveAlternateScreen
+        );
         let _ = disable_raw_mode();
-        let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
     }
 }
 
