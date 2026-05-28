@@ -6,7 +6,10 @@ use crate::sockets::spawn_listeners;
 use crate::tui::{render, FeedView};
 use anyhow::Result;
 use crossterm::{
-    event::{self, DisableBracketedPaste, EnableBracketedPaste, Event},
+    event::{
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, MouseEventKind,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -123,6 +126,13 @@ async fn run_async(rest: Vec<String>, socket_dir: PathBuf) -> Result<()> {
 
         if event::poll(Duration::from_millis(33))? {
             match event::read()? {
+                Event::Mouse(me) if current == ViewState::Feed => match me.kind {
+                    MouseEventKind::ScrollUp => {
+                        feed.scroll_up(&buffers.lock().unwrap(), 3);
+                    }
+                    MouseEventKind::ScrollDown => feed.scroll_down(3),
+                    _ => {}
+                },
                 Event::Paste(text) if current == ViewState::Claude => {
                     // Forward pasted text to claude wrapped in bracketed-paste markers,
                     // so claude's own input handler treats it as a single paste rather
@@ -144,7 +154,10 @@ async fn run_async(rest: Vec<String>, socket_dir: PathBuf) -> Result<()> {
                             // resize-based repaint in case claude wrote anything
                             // in between (the reader thread discards bytes in
                             // feed view, so the main buffer is stale).
-                            execute!(std::io::stdout(), LeaveAlternateScreen)?;
+                            // Disable mouse capture so the user gets their
+                            // terminal's native scrollback / text selection
+                            // back in the Claude view.
+                            execute!(std::io::stdout(), DisableMouseCapture, LeaveAlternateScreen,)?;
                             let (cur_cols, cur_rows) =
                                 crossterm::terminal::size().unwrap_or((cols, rows));
                             let shrunk = cur_rows.saturating_sub(1).max(1);
@@ -163,10 +176,12 @@ async fn run_async(rest: Vec<String>, socket_dir: PathBuf) -> Result<()> {
                             });
                         } else {
                             // Entering the feed: switch to alt-screen so claude's
-                            // TUI is stashed by the terminal, then invalidate
-                            // ratatui's diff buffer so the first feed frame paints
-                            // every cell.
-                            execute!(std::io::stdout(), EnterAlternateScreen)?;
+                            // TUI is stashed by the terminal, enable mouse capture
+                            // so the wheel can scroll the feed (the terminal's
+                            // native scrollback doesn't apply in alt-screen), then
+                            // invalidate ratatui's diff buffer so the first feed
+                            // frame paints every cell.
+                            execute!(std::io::stdout(), EnterAlternateScreen, EnableMouseCapture,)?;
                             term.clear()?;
                         }
                     }
@@ -215,8 +230,9 @@ impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = execute!(
             std::io::stdout(),
+            DisableMouseCapture,
             DisableBracketedPaste,
-            LeaveAlternateScreen
+            LeaveAlternateScreen,
         );
         let _ = disable_raw_mode();
     }
