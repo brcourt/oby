@@ -30,6 +30,10 @@ pub enum FeedNav {
     AgentNext,
     ScrollUp,
     ScrollDown,
+    PageUp,
+    PageDown,
+    JumpTop,
+    JumpBottom,
     Quit,
 }
 
@@ -48,6 +52,15 @@ pub fn decide(ev: KeyEvent, state: ViewState) -> InputDecision {
         ViewState::Feed => match ev.code {
             KeyCode::Up => InputDecision::NavigateFeed(FeedNav::ScrollUp),
             KeyCode::Down => InputDecision::NavigateFeed(FeedNav::ScrollDown),
+            KeyCode::PageUp => InputDecision::NavigateFeed(FeedNav::PageUp),
+            KeyCode::PageDown => InputDecision::NavigateFeed(FeedNav::PageDown),
+            KeyCode::Home => InputDecision::NavigateFeed(FeedNav::JumpTop),
+            KeyCode::End => InputDecision::NavigateFeed(FeedNav::JumpBottom),
+            // g / G — vim-style top/bottom jumps for power users.
+            KeyCode::Char('g') if !ev.modifiers.contains(KeyModifiers::CONTROL) => {
+                InputDecision::NavigateFeed(FeedNav::JumpTop)
+            }
+            KeyCode::Char('G') => InputDecision::NavigateFeed(FeedNav::JumpBottom),
             KeyCode::Left => InputDecision::NavigateFeed(FeedNav::AgentPrev),
             KeyCode::Right => InputDecision::NavigateFeed(FeedNav::AgentNext),
             KeyCode::Char('q') => InputDecision::NavigateFeed(FeedNav::Quit),

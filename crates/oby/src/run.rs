@@ -179,8 +179,13 @@ async fn run_async(rest: Vec<String>, socket_dir: PathBuf) -> Result<()> {
                     InputDecision::NavigateFeed(nav) => match nav {
                         FeedNav::AgentPrev => feed.cycle_agent(&buffers.lock().unwrap(), -1),
                         FeedNav::AgentNext => feed.cycle_agent(&buffers.lock().unwrap(), 1),
+                        FeedNav::ScrollUp => feed.scroll_up(&buffers.lock().unwrap(), 1),
+                        FeedNav::ScrollDown => feed.scroll_down(1),
+                        FeedNav::PageUp => feed.scroll_up(&buffers.lock().unwrap(), 10),
+                        FeedNav::PageDown => feed.scroll_down(10),
+                        FeedNav::JumpTop => feed.scroll_to_top(&buffers.lock().unwrap()),
+                        FeedNav::JumpBottom => feed.scroll_to_bottom(),
                         FeedNav::Quit => break,
-                        FeedNav::ScrollUp | FeedNav::ScrollDown => {}
                     },
                 },
                 _ => {}
