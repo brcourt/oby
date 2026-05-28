@@ -523,7 +523,7 @@ dependencies = [
 
 [[package]]
 name = "oby-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -544,7 +544,7 @@ dependencies = [
 
 [[package]]
 name = "oby-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -553,7 +553,7 @@ dependencies = [
 
 [[package]]
 name = "oby-hook"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "oby-core",
@@ -567,7 +567,7 @@ dependencies = [
 
 [[package]]
 name = "oby-tee"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
