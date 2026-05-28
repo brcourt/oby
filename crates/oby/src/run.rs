@@ -21,7 +21,22 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use uuid::Uuid;
 
+/// True when `OBS_ACTIVE` is already set in our env — meaning we're being
+/// launched from inside an existing oby-wrapped claude session. Nesting is
+/// not supported: two oby wrappers on the same pty would fight for the
+/// terminal and CC's Bash tool would block forever waiting for the inner
+/// claude to exit.
+fn is_nested_session() -> bool {
+    std::env::var_os("OBS_ACTIVE").is_some()
+}
+
 pub fn run(rest: Vec<String>) -> ExitCode {
+    if is_nested_session() {
+        eprintln!("oby: refusing to nest — OBS_ACTIVE is already set.");
+        eprintln!("     you're trying to start an oby session from inside an existing one.");
+        eprintln!("     exit this session first, or run plain `claude` for an unwrapped session.");
+        return ExitCode::FAILURE;
+    }
     // Set env BEFORE the multi-threaded tokio runtime starts. std::env::set_var
     // is unsound once worker threads exist.
     let session_id = Uuid::new_v4().simple().to_string();
@@ -289,4 +304,30 @@ fn dummy_child() -> Box<dyn portable_pty::Child + Send + Sync> {
         }
     }
     Box::new(Dummy)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_refuses_when_obs_active_already_set() {
+        // We can't easily run() to completion in a unit test (it opens a pty
+        // and spawns claude). But we CAN check the early-exit behavior by
+        // setting OBS_ACTIVE and invoking the nesting check directly.
+        //
+        // To keep this testable, the actual run() must call into a small
+        // free function we can poke at.
+        std::env::set_var("OBS_ACTIVE", "1");
+        let nested = is_nested_session();
+        std::env::remove_var("OBS_ACTIVE");
+        assert!(nested);
+    }
+
+    #[test]
+    fn is_nested_returns_false_when_obs_active_unset() {
+        // Belt-and-suspenders: ensure not set, then check.
+        std::env::remove_var("OBS_ACTIVE");
+        assert!(!is_nested_session());
+    }
 }
