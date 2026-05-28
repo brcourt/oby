@@ -200,14 +200,31 @@ async fn run_async(rest: Vec<String>, socket_dir: PathBuf) -> Result<()> {
                         FeedNav::JumpBottom => feed.scroll_to_bottom(),
                         FeedNav::DeleteAgent => {
                             let to_remove = feed.selected_agent.clone();
-                            let removed = {
+                            let removed_idx = feed.agent_index;
+                            let new_selection: Option<(String, usize)> = {
                                 let mut b = buffers.lock().unwrap();
-                                b.remove_agent(&to_remove)
+                                if b.remove_agent(&to_remove) {
+                                    // Select the agent that's now at the same
+                                    // index as the deleted one (= the tab
+                                    // immediately right of the deleted one).
+                                    // If we deleted the rightmost tab, step
+                                    // back by one. Lets the user spam `d` to
+                                    // burn through a long list.
+                                    let keys: Vec<String> =
+                                        b.agents().map(|a| a.agent_key.clone()).collect();
+                                    if keys.is_empty() {
+                                        Some(("main".to_string(), 0))
+                                    } else {
+                                        let new_idx = removed_idx.min(keys.len() - 1);
+                                        Some((keys[new_idx].clone(), new_idx))
+                                    }
+                                } else {
+                                    None
+                                }
                             };
-                            if removed {
-                                // Snap selection back to main and reset scroll.
-                                feed.selected_agent = "main".into();
-                                feed.agent_index = 0;
+                            if let Some((key, idx)) = new_selection {
+                                feed.selected_agent = key;
+                                feed.agent_index = idx;
                                 feed.scroll_offset = 0;
                             }
                         }
