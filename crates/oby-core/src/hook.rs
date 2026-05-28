@@ -36,6 +36,11 @@ pub enum HookEvent {
     Pre,
     #[serde(rename = "PostToolUse")]
     Post,
+    /// Fires when a tool call returned an error. CC routes failures here
+    /// instead of `PostToolUse`, so without an explicit handler the entry
+    /// would stay pending on any failed Read/Bash/etc.
+    #[serde(rename = "PostToolUseFailure")]
+    PostFailure,
 }
 
 #[derive(Debug, Clone, Deserialize)]

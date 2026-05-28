@@ -1,5 +1,5 @@
 use anyhow::Result;
-use oby_core::{ControlMessage, HookContext, HookEvent, RewriteDecision};
+use oby_core::{ControlMessage, EntryStatus, HookContext, HookEvent, RewriteDecision};
 use serde_json::Value;
 use std::io::Read;
 use std::path::PathBuf;
@@ -155,6 +155,31 @@ async fn run() -> Result<()> {
             } else {
                 debug_log(
                     "post_no_update",
+                    "",
+                    &payload.ctx.tool_name,
+                    &payload.ctx.tool_use_id,
+                );
+            }
+        }
+        HookEvent::PostFailure => {
+            // CC routes tool errors to PostToolUseFailure rather than PostToolUse.
+            // Route through the capturer's normal post-render path so we still get
+            // a summary line, but force the status to Error regardless of what
+            // the capturer's heuristic decided.
+            if let Some(mut update) =
+                cap.render_post(&payload.ctx, &payload.tool_input, &payload.tool_response)
+            {
+                update.status = EntryStatus::Error;
+                debug_log(
+                    "post_failure",
+                    &format!("{:?}", update.status),
+                    &payload.ctx.tool_name,
+                    &payload.ctx.tool_use_id,
+                );
+                send_to_wrapper(&socket_dir, ControlMessage::update(update)).await;
+            } else {
+                debug_log(
+                    "post_failure_no_update",
                     "",
                     &payload.ctx.tool_name,
                     &payload.ctx.tool_use_id,

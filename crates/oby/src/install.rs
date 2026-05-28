@@ -42,7 +42,7 @@ fn install() -> Result<()> {
         .as_object_mut()
         .context("settings.hooks must be an object")?;
 
-    for event in ["PreToolUse", "PostToolUse"] {
+    for event in ["PreToolUse", "PostToolUse", "PostToolUseFailure"] {
         let arr = hooks_obj.entry(event).or_insert_with(|| json!([]));
         let arr = arr.as_array_mut().context("hook event must be an array")?;
         for tool in OBSERVED_TOOLS {
