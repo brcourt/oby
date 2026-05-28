@@ -1,5 +1,3 @@
-#![allow(dead_code)] // wired into run.rs in Task 7.7
-
 use crate::ring::{AgentRing, AllAgentBuffers, EntryRecord};
 use oby_core::{EntryBody, EntryStatus};
 use ratatui::{

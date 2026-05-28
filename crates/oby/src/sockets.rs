@@ -1,5 +1,3 @@
-#![allow(dead_code, unused_imports)] // consumed by run.rs in Task 7.7
-
 use anyhow::Result;
 use oby_core::{ControlMessage, HeaderLine};
 use std::path::{Path, PathBuf};

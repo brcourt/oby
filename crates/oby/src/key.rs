@@ -1,5 +1,3 @@
-#![allow(dead_code)] // consumed by run.rs in Task 7.7
-
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]

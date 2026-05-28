@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use anyhow::{Context, Result};
 use portable_pty::{native_pty_system, CommandBuilder, PtyPair, PtySize};
 use std::sync::mpsc::Receiver;
