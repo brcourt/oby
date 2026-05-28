@@ -1,6 +1,4 @@
-#![allow(dead_code, unused_imports)] // this module is consumed by Task 7.3+ (sockets) and 7.6 (tui)
-
-use oby_core::{DisplayEntry, DisplayEntryUpdate, EntryBody, EntryStatus};
+use oby_core::{DisplayEntry, DisplayEntryUpdate, EntryBody};
 use std::collections::{HashMap, VecDeque};
 
 const DEFAULT_CAPACITY: usize = 500;
@@ -95,8 +93,21 @@ impl AllAgentBuffers {
         }
     }
 
+    /// Iterate agents in a stable order: "main" first, then the rest alphabetically.
+    /// HashMap iteration order would otherwise shuffle the feed picker between renders.
     pub fn agents(&self) -> impl Iterator<Item = &AgentRing> {
-        self.inner.values()
+        let mut sorted: Vec<&AgentRing> = self.inner.values().collect();
+        sorted.sort_by(|a, b| {
+            let ak = a.agent_key.as_str();
+            let bk = b.agent_key.as_str();
+            match (ak == "main", bk == "main") {
+                (true, true) => std::cmp::Ordering::Equal,
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => ak.cmp(bk),
+            }
+        });
+        sorted.into_iter()
     }
 
     pub fn get(&self, agent_key: &str) -> Option<&AgentRing> {
@@ -107,6 +118,7 @@ impl AllAgentBuffers {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use oby_core::EntryStatus;
     use std::time::SystemTime;
 
     fn entry(agent: &str, tuid: &str, body: EntryBody) -> DisplayEntry {
