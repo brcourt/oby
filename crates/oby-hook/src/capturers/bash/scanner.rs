@@ -231,6 +231,208 @@ pub fn pipe_segments(s: &str) -> Vec<PipeSegment> {
     out
 }
 
+/// File-redirect operator and target.
+#[allow(dead_code)]
+#[derive(Debug, PartialEq, Eq)]
+pub struct Redirect {
+    pub kind: RedirectKind,
+    /// Byte offset of the `>` (or first `>` in `>>`).
+    pub op_start: usize,
+    /// Byte offset just past the operator (`>` is 1 byte; `>>` is 2).
+    pub op_end: usize,
+    /// Byte range of the redirect target (file path), possibly quoted.
+    pub target_start: usize,
+    pub target_end: usize,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, PartialEq, Eq, Copy, Clone)]
+pub enum RedirectKind {
+    /// `> FILE`
+    Out,
+    /// `>> FILE`
+    Append,
+}
+
+/// Find bare `>` and `>>` redirects in `s`. FD-prefixed redirects (`2>`,
+/// `2>>`, `&>`, etc.) and process substitution (`>(...)`) are intentionally
+/// excluded — those are either handled by v0.1's existing 2>/dev/null
+/// rewrite path or out of scope for v0.2.
+#[allow(dead_code)]
+pub fn redirects(s: &str) -> Vec<Redirect> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+
+    let mut paren_depth: u32 = 0;
+    let mut bracket_depth: u32 = 0;
+    let mut backtick_depth: u32 = 0;
+
+    while i < bytes.len() {
+        let c = bytes[i];
+        match c {
+            b'\'' => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'\'' {
+                    i += 1;
+                }
+                if i < bytes.len() {
+                    i += 1;
+                }
+            }
+            b'"' => {
+                i += 1;
+                while i < bytes.len() {
+                    match bytes[i] {
+                        b'\\' if i + 1 < bytes.len() => i += 2,
+                        b'"' => {
+                            i += 1;
+                            break;
+                        }
+                        _ => i += 1,
+                    }
+                }
+            }
+            b'#' => {
+                let prev_is_ws =
+                    i == 0 || matches!(bytes[i - 1], b' ' | b'\t' | b'\n' | b';' | b'|' | b'&');
+                if prev_is_ws {
+                    while i < bytes.len() && bytes[i] != b'\n' {
+                        i += 1;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            b'$' if i + 1 < bytes.len() && bytes[i + 1] == b'(' => {
+                paren_depth += 1;
+                i += 2;
+            }
+            b'(' => {
+                paren_depth += 1;
+                i += 1;
+            }
+            b')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+                i += 1;
+            }
+            b'[' if i + 1 < bytes.len() && bytes[i + 1] == b'[' => {
+                bracket_depth += 1;
+                i += 2;
+            }
+            b']' if i + 1 < bytes.len() && bytes[i + 1] == b']' => {
+                bracket_depth = bracket_depth.saturating_sub(1);
+                i += 2;
+            }
+            b'`' => {
+                if backtick_depth == 0 {
+                    backtick_depth = 1;
+                } else {
+                    backtick_depth = 0;
+                }
+                i += 1;
+            }
+            b'>' if paren_depth == 0 && bracket_depth == 0 && backtick_depth == 0 => {
+                // Reject FD-prefixed redirects: scan one byte left for a digit.
+                let preceded_by_digit = i > 0 && bytes[i - 1].is_ascii_digit();
+                if preceded_by_digit {
+                    i += 1;
+                    continue;
+                }
+                let is_append = i + 1 < bytes.len() && bytes[i + 1] == b'>';
+                let op_start = i;
+                let op_end = if is_append { i + 2 } else { i + 1 };
+                // Reject `> >(...)` process substitution: peek past whitespace
+                // for an unquoted `(`.
+                let mut probe = op_end;
+                while probe < bytes.len() && (bytes[probe] == b' ' || bytes[probe] == b'\t') {
+                    probe += 1;
+                }
+                // Detect both `>(...)` (process substitution used directly as
+                // target) and the literal `>` at probe being followed by `(`.
+                let is_proc_subst = probe < bytes.len()
+                    && (bytes[probe] == b'('
+                        || (bytes[probe] == b'>'
+                            && probe + 1 < bytes.len()
+                            && bytes[probe + 1] == b'('));
+                if is_proc_subst {
+                    // process substitution; skip this redirect entirely.
+                    i = op_end;
+                    continue;
+                }
+                // Parse target word.
+                let (target_start, target_end) = parse_redirect_target(bytes, op_end);
+                out.push(Redirect {
+                    kind: if is_append {
+                        RedirectKind::Append
+                    } else {
+                        RedirectKind::Out
+                    },
+                    op_start,
+                    op_end,
+                    target_start,
+                    target_end,
+                });
+                i = target_end;
+            }
+            _ => i += 1,
+        }
+    }
+    out
+}
+
+/// Find the next shell word starting at `from`. Quoted words are returned
+/// with their surrounding quotes intact. Stops at whitespace, `;`, `&`, `|`,
+/// or EOL.
+fn parse_redirect_target(bytes: &[u8], from: usize) -> (usize, usize) {
+    let mut i = from;
+    // Skip leading whitespace.
+    while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
+        i += 1;
+    }
+    let start = i;
+    if i >= bytes.len() {
+        return (start, start);
+    }
+    match bytes[i] {
+        b'\'' => {
+            i += 1;
+            while i < bytes.len() && bytes[i] != b'\'' {
+                i += 1;
+            }
+            if i < bytes.len() {
+                i += 1; // consume closing quote
+            }
+        }
+        b'"' => {
+            i += 1;
+            while i < bytes.len() {
+                match bytes[i] {
+                    b'\\' if i + 1 < bytes.len() => i += 2,
+                    b'"' => {
+                        i += 1;
+                        break;
+                    }
+                    _ => i += 1,
+                }
+            }
+        }
+        _ => {
+            while i < bytes.len()
+                && bytes[i] != b' '
+                && bytes[i] != b'\t'
+                && bytes[i] != b'\n'
+                && bytes[i] != b';'
+                && bytes[i] != b'&'
+                && bytes[i] != b'|'
+            {
+                i += 1;
+            }
+        }
+    }
+    (start, i)
+}
+
 /// Find the first whitespace-delimited word in `s[start..end]`. Returns
 /// (word_start, word_end) — byte offsets into `s`. If the slice is all
 /// whitespace, returns (end, end).
@@ -382,5 +584,84 @@ mod tests {
         let s = "ls |    grep foo";
         // Second segment's first word starts at the 'g' of 'grep', not at the space.
         assert_eq!(&s[segs[1].first_word_start..segs[1].first_word_end], "grep");
+    }
+
+    #[test]
+    fn redirects_simple_out() {
+        let r = redirects("ls > out.txt");
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].kind, RedirectKind::Out);
+        let s = "ls > out.txt";
+        assert_eq!(&s[r[0].target_start..r[0].target_end], "out.txt");
+    }
+
+    #[test]
+    fn redirects_simple_append() {
+        let r = redirects("ls >> out.txt");
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].kind, RedirectKind::Append);
+        let s = "ls >> out.txt";
+        assert_eq!(&s[r[0].target_start..r[0].target_end], "out.txt");
+    }
+
+    #[test]
+    fn redirects_quoted_target_double() {
+        let r = redirects(r#"ls > "foo bar.txt""#);
+        assert_eq!(r.len(), 1);
+        let s = r#"ls > "foo bar.txt""#;
+        assert_eq!(&s[r[0].target_start..r[0].target_end], r#""foo bar.txt""#);
+    }
+
+    #[test]
+    fn redirects_quoted_target_single() {
+        let r = redirects("ls > 'a b c'");
+        assert_eq!(r.len(), 1);
+        let s = "ls > 'a b c'";
+        assert_eq!(&s[r[0].target_start..r[0].target_end], "'a b c'");
+    }
+
+    #[test]
+    fn redirects_fd_prefixed_redirect_excluded() {
+        // `2> err` is FD-specific (v0.1 handles 2>/dev/null already). The
+        // v0.2 scanner emits nothing for digit-prefixed redirects.
+        let r = redirects("ls 2> err.txt");
+        assert!(r.is_empty());
+    }
+
+    #[test]
+    fn redirects_process_substitution_excluded() {
+        // `> >(...)` is a redirect to a process substitution, not a file.
+        // We must not match this as a file redirect.
+        let r = redirects("ls > >(tee /tmp/x >/dev/null)");
+        assert!(r.is_empty());
+    }
+
+    #[test]
+    fn redirects_quoted_metachar_excluded() {
+        // `>` inside quotes is text, not a redirect.
+        let r = redirects(r#"echo "a > b""#);
+        assert!(r.is_empty());
+    }
+
+    #[test]
+    fn redirects_comment_excluded() {
+        let r = redirects("ls # > out.txt");
+        assert!(r.is_empty());
+    }
+
+    #[test]
+    fn redirects_multiple() {
+        // `cmd > a >> b` is unusual but legal: stdout to a, then reopened
+        // appending to b. Both should be emitted.
+        let r = redirects("cmd > a >> b");
+        assert_eq!(r.len(), 2);
+        assert_eq!(r[0].kind, RedirectKind::Out);
+        assert_eq!(r[1].kind, RedirectKind::Append);
+    }
+
+    #[test]
+    fn redirects_inside_command_substitution_excluded() {
+        let r = redirects("echo $(cat > /tmp/x)");
+        assert!(r.is_empty());
     }
 }
