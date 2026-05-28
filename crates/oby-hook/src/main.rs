@@ -1,5 +1,7 @@
 mod capturers;
+mod env_gate;
+mod registry;
 
 fn main() {
-    // Filled in by Epic 6.
+    // Filled in by Task 6.2.
 }
