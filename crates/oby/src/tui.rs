@@ -6,7 +6,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
     Terminal,
 };
 
@@ -57,7 +57,12 @@ pub fn render<B: Backend>(
         f.render_widget(metrics_bar(metrics, buffers), chunks[0]);
         f.render_widget(header(view), chunks[1]);
         let ring = buffers.get(&view.selected_agent);
-        f.render_widget(entries_block(ring), chunks[2]);
+        let (list, mut state) = entries_block(ring);
+        // Stateful render with the last entry selected → ratatui scrolls so the
+        // most recent activity stays visible at the bottom. Without this, items
+        // append to the back of the VecDeque but get clipped below the viewport
+        // and the user sees only the very first frame's worth of entries forever.
+        f.render_stateful_widget(list, chunks[2], &mut state);
         f.render_widget(agent_picker(buffers, &view.selected_agent), chunks[3]);
     })?;
     Ok(())
@@ -92,12 +97,17 @@ fn metrics_bar(m: &Metrics, buffers: &AllAgentBuffers) -> Paragraph<'static> {
     Paragraph::new(line).style(Style::default().fg(Color::DarkGray))
 }
 
-fn entries_block(ring: Option<&AgentRing>) -> List<'static> {
+fn entries_block(ring: Option<&AgentRing>) -> (List<'static>, ListState) {
     let items: Vec<ListItem> = match ring {
         None => vec![ListItem::new("no entries yet")],
         Some(r) => r.entries.iter().map(format_entry).collect(),
     };
-    List::new(items).block(Block::default().borders(Borders::ALL).title("activity"))
+    let mut state = ListState::default();
+    if !items.is_empty() {
+        state.select(Some(items.len() - 1));
+    }
+    let list = List::new(items).block(Block::default().borders(Borders::ALL).title("activity"));
+    (list, state)
 }
 
 fn format_entry(rec: &EntryRecord) -> ListItem<'static> {
