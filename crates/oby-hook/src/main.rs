@@ -22,13 +22,26 @@ struct RawPayload {
     tool_response: Value,
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
-    if let Err(e) = run().await {
-        // Fail-open. Never break the agent.
-        eprintln!("oby-hook: {e:#}");
+fn main() -> ExitCode {
+    let mut args = std::env::args().skip(1);
+    if matches!(args.next().as_deref(), Some("--version" | "-V")) {
+        println!("oby-hook {}", env!("CARGO_PKG_VERSION"));
+        return ExitCode::SUCCESS;
     }
-    ExitCode::SUCCESS
+    // No early exit — build a tokio runtime and dispatch to the async body.
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("oby-hook: failed to start runtime: {e}");
+            return ExitCode::SUCCESS; // fail-open per v0.1 design
+        }
+    };
+    rt.block_on(async {
+        if let Err(e) = run().await {
+            eprintln!("oby-hook: {e:#}");
+        }
+        ExitCode::SUCCESS
+    })
 }
 
 async fn run() -> Result<()> {
