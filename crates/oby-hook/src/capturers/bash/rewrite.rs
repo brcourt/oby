@@ -10,8 +10,12 @@ pub fn rewrite(command: &str, agent_key: &str, tool_use_id: &str) -> Option<Stri
     let inner = neutralize_dev_null_stderr(command, agent_key, tool_use_id);
     let stdout_sink = obi_tee_invocation(agent_key, tool_use_id, "stdout");
     let stderr_sink = obi_tee_invocation(agent_key, tool_use_id, "stderr");
+    // Newline (not `;`) before the closing `}` so that a trailing
+    // `# comment` in the inner command is terminated. With `;`, an
+    // unterminated `#`-to-EOL comment swallowed the closing brace and
+    // produced a zsh/bash parse error.
     Some(format!(
-        "{{ {inner} ; }} > >(tee >({stdout_sink} >/dev/null)) 2> >(tee >({stderr_sink} >/dev/null) >&2)"
+        "{{ {inner}\n}} > >(tee >({stdout_sink} >/dev/null)) 2> >(tee >({stderr_sink} >/dev/null) >&2)"
     ))
 }
 
@@ -101,7 +105,7 @@ mod tests {
     fn outer_wrap_form() {
         // We rely on the test env running bash/zsh — should hold on the dev machine.
         let out = rewrite("ls -la", "main", "t1").expect("bash/zsh expected in test env");
-        assert!(out.starts_with("{ ls -la ; } > >(tee >(oby-tee"));
+        assert!(out.starts_with("{ ls -la\n} > >(tee >(oby-tee"));
         assert!(out.contains("--agent 'main'"));
         assert!(out.contains("--tool-use-id 't1'"));
         assert!(out.contains("--stream 'stdout'"));
@@ -112,5 +116,27 @@ mod tests {
     fn rewrite_includes_dev_null_neutralization() {
         let out = rewrite("cmd 2>/dev/null", "main", "t1").unwrap();
         assert!(out.contains("--stream stderr-discarded"));
+    }
+
+    /// Regression for scenario 6 in docs/testing/v0.1-manual.md.
+    /// A trailing `#` comment must NOT swallow the closing brace of the outer
+    /// wrap. With `; }`, the `#` runs to the next newline and the inner block
+    /// is never closed, causing a zsh parse error. With `\n}`, the newline
+    /// terminates the comment.
+    #[test]
+    fn trailing_comment_does_not_break_outer_wrap() {
+        let out = rewrite("echo ok # 2>/dev/null trailing comment", "main", "t1").unwrap();
+        // The closing brace must be on its own line (post-comment), not on the
+        // same line as the comment.
+        assert!(
+            out.contains("trailing comment\n}"),
+            "newline must follow the inner so a trailing # comment is terminated; got: {out}"
+        );
+        // And the comment region must NOT have been rewritten — the 2>/dev/null
+        // inside the # comment is just text, the scanner correctly excluded it.
+        assert!(
+            !out.contains("# 2> >(oby-tee"),
+            "the 2>/dev/null inside a # comment must not be rewritten; got: {out}"
+        );
     }
 }
