@@ -7,6 +7,12 @@ const DEFAULT_CAPACITY: usize = 500;
 pub struct AllAgentBuffers {
     /// agent_key → AgentRing
     inner: HashMap<String, AgentRing>,
+    /// Updates that arrived before their matching entry. Each hook invocation
+    /// opens its own connection to control.sock and the listener handles them
+    /// concurrently, so a PostToolUse Update can race ahead of its PreToolUse
+    /// Entry on a fast tool (e.g. a small Read). Stash by tool_use_id and apply
+    /// in push_entry when the entry shows up.
+    orphan_updates: HashMap<String, DisplayEntryUpdate>,
 }
 
 pub struct AgentRing {
@@ -31,6 +37,10 @@ pub struct LiveChunk {
 impl AllAgentBuffers {
     pub fn push_entry(&mut self, entry: DisplayEntry) {
         let key = entry.agent_key.clone();
+        let tool_use_id = entry.tool_use_id.clone();
+        // Drain any orphan update *before* taking the mutable borrow on a ring.
+        let orphan = self.orphan_updates.remove(&tool_use_id);
+
         let ring = self.inner.entry(key.clone()).or_insert_with(|| AgentRing {
             agent_key: key,
             agent_type: None,
@@ -44,6 +54,11 @@ impl AllAgentBuffers {
             entry,
             live: Vec::new(),
         });
+        if let Some(upd) = orphan {
+            // Safe: we just pushed; back_mut() is the entry we want.
+            let rec = ring.entries.back_mut().expect("just pushed");
+            merge_update_into(rec, upd);
+        }
     }
 
     pub fn apply_update(&mut self, upd: DisplayEntryUpdate) {
@@ -53,22 +68,12 @@ impl AllAgentBuffers {
                 .iter_mut()
                 .rfind(|r| r.entry.tool_use_id == upd.tool_use_id)
             {
-                rec.entry.status = upd.status;
-                if let Some(body) = upd.append_body {
-                    // For Text, replace the body; for None, leave; for LiveStream, ignore.
-                    if !matches!(rec.entry.body, EntryBody::LiveStream { .. }) {
-                        rec.entry.body = body;
-                    } else if let EntryBody::Text { text } = body {
-                        // For live-stream entries, attach final text as an extra chunk.
-                        rec.live.push(LiveChunk {
-                            stream: "post-summary".into(),
-                            bytes: text.into_bytes(),
-                        });
-                    }
-                }
+                merge_update_into(rec, upd);
                 return;
             }
         }
+        // No matching entry yet — stash and let push_entry apply it later.
+        self.orphan_updates.insert(upd.tool_use_id.clone(), upd);
     }
 
     pub fn append_live(
@@ -115,6 +120,22 @@ impl AllAgentBuffers {
     }
 }
 
+fn merge_update_into(rec: &mut EntryRecord, upd: DisplayEntryUpdate) {
+    rec.entry.status = upd.status;
+    if let Some(body) = upd.append_body {
+        // For Text, replace the body; for None, leave; for LiveStream, ignore.
+        if !matches!(rec.entry.body, EntryBody::LiveStream { .. }) {
+            rec.entry.body = body;
+        } else if let EntryBody::Text { text } = body {
+            // For live-stream entries, attach final text as an extra chunk.
+            rec.live.push(LiveChunk {
+                stream: "post-summary".into(),
+                bytes: text.into_bytes(),
+            });
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -140,6 +161,29 @@ mod tests {
         b.push_entry(entry("agent_a", "t2", EntryBody::None));
         assert_eq!(b.get("main").unwrap().entries.len(), 1);
         assert_eq!(b.get("agent_a").unwrap().entries.len(), 1);
+    }
+
+    #[test]
+    fn update_before_entry_is_applied_when_entry_arrives() {
+        // The PostToolUse Update can race ahead of the PreToolUse Entry on a
+        // fast tool (e.g. small Read). The orphan-update buffer must hold the
+        // update until push_entry brings the matching entry in.
+        let mut b = AllAgentBuffers::default();
+        b.apply_update(DisplayEntryUpdate {
+            tool_use_id: "t1".into(),
+            status: EntryStatus::Ok,
+            append_body: Some(EntryBody::Text {
+                text: "5 bytes".into(),
+            }),
+        });
+        // No matching entry — update is parked, not lost.
+        assert!(b.get("main").is_none());
+
+        b.push_entry(entry("main", "t1", EntryBody::None));
+
+        let rec = b.get("main").unwrap().entries.front().unwrap();
+        assert_eq!(rec.entry.status, EntryStatus::Ok);
+        assert!(matches!(&rec.entry.body, EntryBody::Text { text } if text == "5 bytes"));
     }
 
     #[test]
