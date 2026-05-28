@@ -40,6 +40,7 @@ fn main() -> ExitCode {
 }
 
 mod install;
+mod ring;
 mod run;
 
 #[cfg(test)]
