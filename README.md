@@ -30,6 +30,19 @@ Press **Ctrl-G** at any time to toggle between the claude session and the activi
 
 Run plain `claude` (no wrapper) for an unobserved session — the hook env-gates itself and no-ops.
 
+### Coexistence with other PreToolUse hooks
+
+If you already have a PreToolUse rewriter installed (e.g. [rtk](https://github.com/anthropics/rtk)), `oby-hook` composes with it automatically. CC runs hooks in parallel and the last to finish wins the `updatedInput` race — `oby-hook` reads `~/.claude/settings.json`, invokes the peer hooks itself in array order, wraps the composed command with its own process substitution, then sleeps `OBS_COMPOSE_DELAY_MS` (default 200ms) so its emit reliably wins. Both your existing rewriter AND oby's chunk capture run.
+
+## Known limitations (v0.1)
+
+- **Read entries stay pending (`▸`) — never transition to `✓`.** Claude Code does not fire `PostToolUse` for the `Read` tool in version 2.1.x, despite the docs implying it should. We can't observe the read completing. The entry is still useful (it records the path), but the status indicator is stuck. Bash and any future tool that does fire PostToolUse work normally.
+- The Bash capturer only neutralizes `2>/dev/null`. Other inner patterns (`| grep`, `| head`, `> FILE`) ship in v0.2.
+- No xtrace / `set -x` — multi-statement scripts only surface outputs, not which command produced them.
+- Only Bash and Read capturers ship. Edit, Write, Grep, Glob, Task, WebFetch tool calls don't show entries in the feed.
+- Feed scrolling is unimplemented (auto-pins to bottom).
+- Hotkey is hardcoded to **Ctrl-G**, ring buffer to 500 entries.
+
 ## Non-goals (for now)
 
 Web UI, cross-session persistence, external user-installable plugins, and Windows support are all deferred. Execution tracing (`set -x` via `BASH_XTRACEFD`) and additional inner-pattern rewrites (`| grep`, `| head`, `> FILE`) ship in v0.2. The architecture is intentionally compatible with each (see §16 of the design doc); none are in the initial scope.
