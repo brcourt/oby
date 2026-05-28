@@ -7,7 +7,8 @@ pub fn rewrite(command: &str, agent_key: &str, tool_use_id: &str) -> Option<Stri
     if !detect().supports_process_substitution() {
         return None;
     }
-    let inner = neutralize_dev_null_stderr(command, agent_key, tool_use_id);
+    let neutralized = neutralize_dev_null_stderr(command, agent_key, tool_use_id);
+    let inner = inject_pre_filter_tees(&neutralized, agent_key, tool_use_id);
     let stdout_sink = obi_tee_invocation(agent_key, tool_use_id, "stdout");
     let stderr_sink = obi_tee_invocation(agent_key, tool_use_id, "stderr");
     // Newline (not `;`) before the closing `}` so that a trailing
@@ -26,6 +27,55 @@ fn obi_tee_invocation(agent_key: &str, tool_use_id: &str, stream: &str) -> Strin
         shell_escape(tool_use_id),
         shell_escape(stream),
     )
+}
+
+/// For every pipe segment whose first word is a "discarding filter"
+/// (grep / head / tail), insert a `tee >(oby-tee --stream stdout-pre-<filter>)
+/// |` immediately before that segment. The original filter still consumes
+/// the producer's output; oby-tee gets a parallel copy via process
+/// substitution.
+///
+/// Multi-stage pipelines like `cmd | grep | head` get a tee at EACH matching
+/// filter; the chunks land as `stdout-pre-grep` and `stdout-pre-head`.
+fn inject_pre_filter_tees(command: &str, agent_key: &str, tool_use_id: &str) -> String {
+    use super::scanner::pipe_segments;
+    const FILTERS: &[(&str, &str)] = &[
+        ("grep", "stdout-pre-grep"),
+        ("head", "stdout-pre-head"),
+        ("tail", "stdout-pre-tail"),
+    ];
+
+    let segments = pipe_segments(command);
+    // Collect (insert_at, text) edits; apply right-to-left so positions
+    // don't shift.
+    let mut edits: Vec<(usize, String)> = Vec::new();
+    for (idx, seg) in segments.iter().enumerate() {
+        if idx == 0 {
+            // First segment is the producer — no preceding `|` to tee onto.
+            continue;
+        }
+        let first_word = &command[seg.first_word_start..seg.first_word_end];
+        let Some((_, stream)) = FILTERS.iter().find(|(name, _)| *name == first_word) else {
+            continue;
+        };
+        let tee = format!(
+            "tee >({} >/dev/null) | ",
+            obi_tee_invocation(agent_key, tool_use_id, stream),
+        );
+        edits.push((seg.start, tee));
+    }
+    apply_inserts(command, edits)
+}
+
+/// Insert `text` at each given byte offset in `command`, processing edits
+/// from right to left so earlier inserts don't shift later positions.
+fn apply_inserts(command: &str, mut edits: Vec<(usize, String)>) -> String {
+    edits.sort_by_key(|e| std::cmp::Reverse(e.0));
+    let mut out = command.to_string();
+    for (pos, text) in edits {
+        out.insert_str(pos, &text);
+    }
+    out
 }
 
 /// Replace each unquoted `2>/dev/null` with `2> >(oby-tee … --stream stderr-discarded)`.
@@ -137,6 +187,74 @@ mod tests {
         assert!(
             !out.contains("# 2> >(oby-tee"),
             "the 2>/dev/null inside a # comment must not be rewritten; got: {out}"
+        );
+    }
+
+    #[test]
+    fn rewrite_grep_injects_pre_grep_tee() {
+        let out = rewrite("ls | grep foo", "main", "t1").unwrap();
+        assert!(
+            out.contains(
+                "tee >(oby-tee --agent 'main' --tool-use-id 't1' --stream 'stdout-pre-grep'"
+            ),
+            "expected stdout-pre-grep tee; got: {out}"
+        );
+        // The original | grep stage must still be there.
+        assert!(
+            out.contains("| grep foo"),
+            "original | grep must be preserved; got: {out}"
+        );
+    }
+
+    #[test]
+    fn rewrite_head_injects_pre_head_tee() {
+        let out = rewrite("cat /etc/passwd | head -n 5", "main", "t1").unwrap();
+        assert!(
+            out.contains("--stream 'stdout-pre-head'"),
+            "expected stdout-pre-head tee; got: {out}"
+        );
+        assert!(out.contains("| head -n 5"));
+    }
+
+    #[test]
+    fn rewrite_tail_injects_pre_tail_tee() {
+        let out = rewrite("cat /etc/passwd | tail -n 3", "main", "t1").unwrap();
+        assert!(out.contains("--stream 'stdout-pre-tail'"));
+        assert!(out.contains("| tail -n 3"));
+    }
+
+    #[test]
+    fn rewrite_first_pipe_stage_not_tee_d() {
+        // The first segment is the producer; no preceding pipe to tee onto.
+        // We only ever tee BEFORE a filter, not before the producer.
+        let out = rewrite("grep foo /etc/passwd", "main", "t1").unwrap();
+        assert!(
+            !out.contains("--stream 'stdout-pre-grep'"),
+            "a bare `grep` (not piped) must not get a pre-grep tee; got: {out}"
+        );
+    }
+
+    #[test]
+    fn rewrite_grep_inside_quoted_string_not_rewritten() {
+        let out = rewrite(r#"echo "ls | grep foo""#, "main", "t1").unwrap();
+        assert!(
+            !out.contains("--stream 'stdout-pre-grep'"),
+            "the quoted `| grep` is text, not a real pipe; got: {out}"
+        );
+    }
+
+    #[test]
+    fn rewrite_grep_in_comment_not_rewritten() {
+        let out = rewrite("echo ok # | grep foo", "main", "t1").unwrap();
+        assert!(!out.contains("--stream 'stdout-pre-grep'"));
+    }
+
+    #[test]
+    fn rewrite_grep_inside_subshell_not_rewritten() {
+        let out = rewrite("(cat foo | grep bar)", "main", "t1").unwrap();
+        assert!(
+            !out.contains("--stream 'stdout-pre-grep'"),
+            "the pipe inside (...) belongs to the subshell, not the outer pipeline"
         );
     }
 }

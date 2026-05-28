@@ -92,7 +92,6 @@ pub fn code_contains(s: &str, needle: &str) -> bool {
 /// range of the segment's text (exclusive of the surrounding `|` characters).
 /// `first_word_start..first_word_end` points at the first whitespace-delimited
 /// token in the segment — typically the command name (`grep`, `head`, …).
-#[allow(dead_code)]
 #[derive(Debug, PartialEq, Eq)]
 pub struct PipeSegment {
     pub start: usize,
@@ -107,7 +106,6 @@ pub struct PipeSegment {
 /// `$( … )` command substitution, backticks, or `[[ … ]]` test expressions
 /// are excluded — they're part of the surrounding segment, not separators.
 /// The logical-or operator `||` is NOT treated as a pipe.
-#[allow(dead_code)]
 pub fn pipe_segments(s: &str) -> Vec<PipeSegment> {
     let bytes = s.as_bytes();
     let mut out = Vec::new();
