@@ -64,6 +64,7 @@ fn main() -> ExitCode {
 
 mod install;
 mod key;
+mod metrics;
 mod probe;
 mod pty;
 mod ring;

@@ -61,7 +61,10 @@ impl AllAgentBuffers {
         }
     }
 
-    pub fn apply_update(&mut self, upd: DisplayEntryUpdate) {
+    /// Returns true iff the update was orphaned (no matching entry, stashed
+    /// for a later push_entry to drain). Callers use this to count orphans
+    /// in the metrics bar.
+    pub fn apply_update(&mut self, upd: DisplayEntryUpdate) -> bool {
         for ring in self.inner.values_mut() {
             if let Some(rec) = ring
                 .entries
@@ -69,11 +72,12 @@ impl AllAgentBuffers {
                 .rfind(|r| r.entry.tool_use_id == upd.tool_use_id)
             {
                 merge_update_into(rec, upd);
-                return;
+                return false;
             }
         }
         // No matching entry yet — stash and let push_entry apply it later.
         self.orphan_updates.insert(upd.tool_use_id.clone(), upd);
+        true
     }
 
     pub fn append_live(

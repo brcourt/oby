@@ -1,4 +1,5 @@
 use crate::key::{decide, FeedNav, InputDecision, ViewState};
+use crate::metrics::Metrics;
 use crate::pty::{spawn_claude, watch_child};
 use crate::ring::AllAgentBuffers;
 use crate::sockets::spawn_listeners;
@@ -48,7 +49,8 @@ async fn run_async(rest: Vec<String>, socket_dir: PathBuf) -> Result<()> {
     let _cleanup = SocketDirCleanup(socket_dir.clone());
 
     let buffers = Arc::new(Mutex::new(AllAgentBuffers::default()));
-    spawn_listeners(socket_dir, buffers.clone()).await?;
+    let metrics = Arc::new(Mutex::new(Metrics::default()));
+    spawn_listeners(socket_dir, buffers.clone(), metrics.clone()).await?;
 
     let (cols, rows) = crossterm::terminal::size()?;
     enable_raw_mode()?;
@@ -108,7 +110,15 @@ async fn run_async(rest: Vec<String>, socket_dir: PathBuf) -> Result<()> {
 
         let current = *view_state.lock().unwrap();
         if current == ViewState::Feed {
-            render(&mut term, &feed, &buffers.lock().unwrap())?;
+            // Snapshot metrics out of the mutex BEFORE taking the buffers
+            // lock so we never hold both across the ratatui draw.
+            let metrics_snapshot = *metrics.lock().unwrap();
+            render(
+                &mut term,
+                &feed,
+                &buffers.lock().unwrap(),
+                &metrics_snapshot,
+            )?;
         }
 
         if event::poll(Duration::from_millis(33))? {

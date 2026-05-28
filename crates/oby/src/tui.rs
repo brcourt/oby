@@ -1,3 +1,4 @@
+use crate::metrics::{fd_count, format_bytes, format_uptime, Metrics};
 use crate::ring::{AgentRing, AllAgentBuffers, EntryRecord};
 use oby_core::{EntryBody, EntryStatus};
 use ratatui::{
@@ -39,22 +40,25 @@ pub fn render<B: Backend>(
     term: &mut Terminal<B>,
     view: &FeedView,
     buffers: &AllAgentBuffers,
+    metrics: &Metrics,
 ) -> anyhow::Result<()> {
     term.draw(|f| {
         let size = f.size();
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1), // header
+                Constraint::Length(1), // title bar
+                Constraint::Length(1), // metrics bar
                 Constraint::Min(1),    // entries
                 Constraint::Length(3), // agent picker
             ])
             .split(size);
 
         f.render_widget(header(view), chunks[0]);
+        f.render_widget(metrics_bar(metrics, buffers), chunks[1]);
         let ring = buffers.get(&view.selected_agent);
-        f.render_widget(entries_block(ring), chunks[1]);
-        f.render_widget(agent_picker(buffers, &view.selected_agent), chunks[2]);
+        f.render_widget(entries_block(ring), chunks[2]);
+        f.render_widget(agent_picker(buffers, &view.selected_agent), chunks[3]);
     })?;
     Ok(())
 }
@@ -65,6 +69,27 @@ fn header(view: &FeedView) -> Paragraph<'static> {
         view.selected_agent
     );
     Paragraph::new(title).style(Style::default().add_modifier(Modifier::REVERSED))
+}
+
+fn metrics_bar(m: &Metrics, buffers: &AllAgentBuffers) -> Paragraph<'static> {
+    let agents = buffers.agents().count();
+    let fd = fd_count()
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "?".into());
+    let line = format!(
+        " agents {} · entries {} · updates {} ({} orph) · bytes {} · conns {} · err {}/{} · fd {} · up {}",
+        agents,
+        m.entries_received,
+        m.updates_received,
+        m.updates_orphaned,
+        format_bytes(m.agent_bytes),
+        m.agent_connections,
+        m.accept_errors,
+        m.parse_errors,
+        fd,
+        format_uptime(m.uptime()),
+    );
+    Paragraph::new(line).style(Style::default().fg(Color::DarkGray))
 }
 
 fn entries_block(ring: Option<&AgentRing>) -> List<'static> {

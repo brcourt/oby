@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
+use crate::metrics::Metrics;
 use crate::ring::AllAgentBuffers;
 
 /// Append a JSON line to `$OBS_WRAPPER_LOG` if that env var is set. Mirrors
@@ -39,6 +40,7 @@ fn debug_log(event: &str, detail: &str) {
 pub async fn spawn_listeners(
     socket_dir: PathBuf,
     buffers: Arc<Mutex<AllAgentBuffers>>,
+    metrics: Arc<Mutex<Metrics>>,
 ) -> Result<()> {
     std::fs::create_dir_all(&socket_dir)?;
 
@@ -46,6 +48,7 @@ pub async fn spawn_listeners(
     let _ = std::fs::remove_file(&control_path);
     let listener = UnixListener::bind(&control_path)?;
     let buffers_for_ctrl = buffers.clone();
+    let metrics_for_ctrl = metrics.clone();
     let socket_dir_clone = socket_dir.clone();
     tokio::spawn(async move {
         // Never exit this task on a transient accept() error (EMFILE under
@@ -56,12 +59,14 @@ pub async fn spawn_listeners(
             match listener.accept().await {
                 Ok((conn, _)) => {
                     let buffers = buffers_for_ctrl.clone();
+                    let metrics = metrics_for_ctrl.clone();
                     let dir = socket_dir_clone.clone();
                     tokio::spawn(async move {
-                        let _ = handle_control(conn, buffers, dir).await;
+                        let _ = handle_control(conn, buffers, metrics, dir).await;
                     });
                 }
                 Err(_) => {
+                    metrics_for_ctrl.lock().unwrap().accept_errors += 1;
                     debug_log("accept_err", "control");
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 }
@@ -72,7 +77,7 @@ pub async fn spawn_listeners(
     // Pre-create the agent socket for "main" so oby-tee never has to race the
     // wrapper's processing of the first PreToolUse Entry. Subagent sockets are
     // still created lazily in handle_control when their first Entry arrives.
-    ensure_agent_listener(&socket_dir, "main", buffers).await;
+    ensure_agent_listener(&socket_dir, "main", buffers, metrics).await;
 
     Ok(())
 }
@@ -80,6 +85,7 @@ pub async fn spawn_listeners(
 async fn handle_control(
     stream: UnixStream,
     buffers: Arc<Mutex<AllAgentBuffers>>,
+    metrics: Arc<Mutex<Metrics>>,
     socket_dir: PathBuf,
 ) -> Result<()> {
     let mut reader = BufReader::new(stream);
@@ -95,6 +101,7 @@ async fn handle_control(
             continue;
         }
         let Ok(msg) = serde_json::from_str::<ControlMessage>(line_trim) else {
+            metrics.lock().unwrap().parse_errors += 1;
             debug_log("ctrl_parse_failed", line_trim);
             continue;
         };
@@ -106,15 +113,24 @@ async fn handle_control(
                     let mut lock = buffers.lock().unwrap();
                     lock.push_entry(entry);
                 }
+                metrics.lock().unwrap().entries_received += 1;
                 debug_log("entry", &format!("{agent_key}/{tuid}"));
-                ensure_agent_listener(&socket_dir, &agent_key, buffers.clone()).await;
+                ensure_agent_listener(&socket_dir, &agent_key, buffers.clone(), metrics.clone())
+                    .await;
             }
             ControlMessage::Update { update, .. } => {
                 let tuid = update.tool_use_id.clone();
                 let status = format!("{:?}", update.status);
-                {
+                let orphaned = {
                     let mut lock = buffers.lock().unwrap();
-                    lock.apply_update(update);
+                    lock.apply_update(update)
+                };
+                {
+                    let mut m = metrics.lock().unwrap();
+                    m.updates_received += 1;
+                    if orphaned {
+                        m.updates_orphaned += 1;
+                    }
                 }
                 debug_log("update", &format!("{tuid} {status}"));
             }
@@ -127,6 +143,7 @@ async fn ensure_agent_listener(
     socket_dir: &Path,
     agent_key: &str,
     buffers: Arc<Mutex<AllAgentBuffers>>,
+    metrics: Arc<Mutex<Metrics>>,
 ) {
     let path = socket_dir.join(format!("{agent_key}.sock"));
     if path.exists() {
@@ -141,12 +158,17 @@ async fn ensure_agent_listener(
             match listener.accept().await {
                 Ok((conn, _)) => {
                     let buffers = buffers.clone();
+                    let metrics_for_conn = metrics.clone();
                     let agent_key = agent_key.clone();
+                    metrics.lock().unwrap().agent_connections += 1;
                     tokio::spawn(async move {
-                        let _ = handle_agent_connection(conn, &agent_key, buffers).await;
+                        let _ =
+                            handle_agent_connection(conn, &agent_key, buffers, metrics_for_conn)
+                                .await;
                     });
                 }
                 Err(_) => {
+                    metrics.lock().unwrap().accept_errors += 1;
                     debug_log("accept_err", &format!("agent:{agent_key}"));
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 }
@@ -159,6 +181,7 @@ async fn handle_agent_connection(
     stream: UnixStream,
     agent_key: &str,
     buffers: Arc<Mutex<AllAgentBuffers>>,
+    metrics: Arc<Mutex<Metrics>>,
 ) -> Result<()> {
     let mut reader = BufReader::new(stream);
     let mut header_line = String::new();
@@ -167,6 +190,7 @@ async fn handle_agent_connection(
         return Ok(());
     }
     let Ok(header) = serde_json::from_str::<HeaderLine>(header_line.trim()) else {
+        metrics.lock().unwrap().parse_errors += 1;
         debug_log("agent_header_parse_failed", header_line.trim());
         return Ok(());
     };
@@ -186,6 +210,7 @@ async fn handle_agent_connection(
             break;
         }
         total += n;
+        metrics.lock().unwrap().agent_bytes += n as u64;
         let mut lock = buffers.lock().unwrap();
         lock.append_live(
             agent_key,
@@ -223,7 +248,8 @@ mod tests {
     async fn control_entry_lands_in_buffer() {
         let dir = TempDir::new().unwrap();
         let buffers = Arc::new(Mutex::new(AllAgentBuffers::default()));
-        spawn_listeners(dir.path().to_path_buf(), buffers.clone())
+        let metrics = Arc::new(Mutex::new(Metrics::default()));
+        spawn_listeners(dir.path().to_path_buf(), buffers.clone(), metrics)
             .await
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -245,7 +271,8 @@ mod tests {
     async fn agent_socket_receives_live_bytes() {
         let dir = TempDir::new().unwrap();
         let buffers = Arc::new(Mutex::new(AllAgentBuffers::default()));
-        spawn_listeners(dir.path().to_path_buf(), buffers.clone())
+        let metrics = Arc::new(Mutex::new(Metrics::default()));
+        spawn_listeners(dir.path().to_path_buf(), buffers.clone(), metrics)
             .await
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
