@@ -8,6 +8,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
 
 mod capturers;
+mod composer;
 mod env_gate;
 mod registry;
 
@@ -78,8 +79,31 @@ async fn run() -> Result<()> {
                     &payload.ctx.tool_use_id,
                 );
             }
+            // Compose with peer PreToolUse hooks first (rtk, etc.) so our
+            // wrap is built on top of their transformations rather than
+            // overwriting them in CC's last-to-finish race.
+            let (composed_input, peers_present) = composer::compose_pre_tool_use_input(
+                &s,
+                &payload.ctx.tool_name,
+                &payload.tool_input,
+            )
+            .await;
+            if peers_present {
+                let preview = composed_input
+                    .get("command")
+                    .and_then(|c| c.as_str())
+                    .map(|s| s.chars().take(160).collect::<String>())
+                    .unwrap_or_default();
+                debug_log(
+                    "compose_peers",
+                    &preview,
+                    &payload.ctx.tool_name,
+                    &payload.ctx.tool_use_id,
+                );
+            }
+
             if let RewriteDecision::Rewrite(new_input) =
-                cap.pre_rewrite(&payload.ctx, &payload.tool_input)
+                cap.pre_rewrite(&payload.ctx, &composed_input)
             {
                 let preview = new_input
                     .get("command")
@@ -92,6 +116,21 @@ async fn run() -> Result<()> {
                     &payload.ctx.tool_name,
                     &payload.ctx.tool_use_id,
                 );
+                // Win CC's last-to-finish race when peers exist. Without this
+                // delay, a peer (rtk) often finishes after us in real-world
+                // timing because it's a simpler process — its updatedInput
+                // overwrites ours and oby-tee never makes it into the
+                // executed command. Override the delay with
+                // OBS_COMPOSE_DELAY_MS if 200ms is too long.
+                if peers_present {
+                    let delay_ms = std::env::var("OBS_COMPOSE_DELAY_MS")
+                        .ok()
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(200);
+                    if delay_ms > 0 {
+                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    }
+                }
                 emit_hook_decision(&new_input)?;
             } else {
                 debug_log(
