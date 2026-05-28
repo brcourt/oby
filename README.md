@@ -6,11 +6,12 @@ Fittingly, **oby** is what's left of *observability* after the middle bytes get 
 
 ## Status
 
-**v0.1 — working PoC.** Bash + Read capturers, `2>/dev/null` discard-recovery, multi-agent routing, composes with other PreToolUse hooks, mouse + keyboard scrollback, top-style metrics bar. Empirically verified against Claude Code `2.1.x`. Implementation plan: [`docs/plans/v0.1.md`](docs/plans/v0.1.md). Architecture: [`docs/architecture.md`](docs/architecture.md).
+**v0.2.** Bash + Read capturers, complete discard-recovery (`2>/dev/null`, `| grep`, `| head`, `| tail`, `> FILE`, `>> FILE`), execution tracing (`set -x` via `BASH_XTRACEFD`), multi-agent routing, composes with other PreToolUse hooks, mouse + keyboard scrollback, top-style metrics bar. Empirically verified against Claude Code `2.1.x`. Implementation plan: [`docs/plans/v0.2.md`](docs/plans/v0.2.md). Architecture: [`docs/architecture.md`](docs/architecture.md).
 
 ## How it works
 
 - A `PreToolUse` hook rewrites Bash commands to tee the bytes that would have been discarded into a per-agent unix socket — the agent's tool result stays byte-identical to what it would have been.
+- The rewrite now also detects `| grep`, `| head`, `| tail`, and `> FILE` / `>> FILE` redirects. For each, a tee is injected so the bytes the agent's pipeline would have discarded (pre-filter output, post-truncation lines, file content) are captured as side-channel chunks. `set -x` via `BASH_XTRACEFD` adds a per-command trace stream for multi-statement scripts.
 - The harness-injected `agent_id` field routes each subagent's commands to its own stream. Main agent and concurrent subagents are cleanly separated.
 - The wrapper owns the terminal: claude in one view, the activity feed in the other, one hotkey to swap.
 - A small plugin trait (`Capturer`) lets each observed tool declare its own renderer in one file in the source tree. Adding a capturer is one PR + one line in the registry.
@@ -154,12 +155,10 @@ End-to-end: CC fires PreToolUse → `oby-hook` dispatches to the capturer → ca
 
 See [`docs/architecture.md`](docs/architecture.md) for the full design.
 
-## Known limitations (v0.1)
+## Known limitations (v0.2)
 
-- Bash capturer only neutralizes `2>/dev/null`. Other inner patterns (`| grep`, `| head`, `> FILE`) ship in v0.2.
-- No execution tracing (`set -x` / `BASH_XTRACEFD`) — multi-statement scripts surface outputs but not which command produced them.
 - Only Bash and Read capturers ship. Edit, Write, Grep, Glob, Task, WebFetch tool calls don't show entries in the feed.
-- Hotkey hardcoded to Ctrl-G, ring buffer to 500 entries. Config file ships in v0.2.
+- Hotkey hardcoded to Ctrl-G, ring buffer to 500 entries. No TOML config yet (deferred to v0.3+).
 
 ## Non-goals (for now)
 
