@@ -8,7 +8,8 @@ pub fn rewrite(command: &str, agent_key: &str, tool_use_id: &str) -> Option<Stri
         return None;
     }
     let neutralized = neutralize_dev_null_stderr(command, agent_key, tool_use_id);
-    let inner = inject_pre_filter_tees(&neutralized, agent_key, tool_use_id);
+    let with_filters = inject_pre_filter_tees(&neutralized, agent_key, tool_use_id);
+    let inner = inject_redirect_tees(&with_filters, agent_key, tool_use_id);
     let stdout_sink = obi_tee_invocation(agent_key, tool_use_id, "stdout");
     let stderr_sink = obi_tee_invocation(agent_key, tool_use_id, "stderr");
     // Newline (not `;`) before the closing `}` so that a trailing
@@ -65,6 +66,41 @@ fn inject_pre_filter_tees(command: &str, agent_key: &str, tool_use_id: &str) -> 
         edits.push((seg.start, tee));
     }
     apply_inserts(command, edits)
+}
+
+/// For every bare `> FILE` or `>> FILE` redirect, replace with
+/// `> >(tee [-a] FILE >(oby-tee --stream stdout-to-file …) >/dev/null)`.
+/// The tee preserves the original write semantics — truncate for `>`,
+/// append for `>>` — and the oby-tee capture runs in parallel via process
+/// substitution. The trailing `>/dev/null` on tee suppresses tee's own
+/// stdout, which otherwise would leak back as cmd's stdout.
+fn inject_redirect_tees(command: &str, agent_key: &str, tool_use_id: &str) -> String {
+    use super::scanner::{redirects, RedirectKind};
+    let mut edits: Vec<(usize, usize, String)> = Vec::new();
+    for r in redirects(command) {
+        let (tee_flag, stream) = match r.kind {
+            RedirectKind::Out => ("", "stdout-to-file"),
+            RedirectKind::Append => ("-a ", "stdout-appended-file"),
+        };
+        let target = &command[r.target_start..r.target_end];
+        let replacement = format!(
+            "> >(tee {tee_flag}{target} >({sink} >/dev/null) >/dev/null)",
+            sink = obi_tee_invocation(agent_key, tool_use_id, stream),
+        );
+        edits.push((r.op_start, r.target_end, replacement));
+    }
+    apply_replacements(command, edits)
+}
+
+/// Replace each `command[start..end]` slice with the given text. Edits are
+/// applied right-to-left so positions don't shift.
+fn apply_replacements(command: &str, mut edits: Vec<(usize, usize, String)>) -> String {
+    edits.sort_by_key(|e| std::cmp::Reverse(e.0));
+    let mut out = command.to_string();
+    for (start, end, text) in edits {
+        out.replace_range(start..end, &text);
+    }
+    out
 }
 
 /// Insert `text` at each given byte offset in `command`, processing edits
@@ -255,6 +291,74 @@ mod tests {
         assert!(
             !out.contains("--stream 'stdout-pre-grep'"),
             "the pipe inside (...) belongs to the subshell, not the outer pipeline"
+        );
+    }
+
+    #[test]
+    fn rewrite_out_redirect_injects_tee_to_file() {
+        let out = rewrite("echo hi > out.txt", "main", "t1").unwrap();
+        assert!(
+            out.contains("> >(tee out.txt >(oby-tee --agent 'main' --tool-use-id 't1' --stream 'stdout-to-file'"),
+            "expected tee + oby-tee wrap around > out.txt; got: {out}"
+        );
+        // Original `> out.txt` literal must NOT appear (we replaced it).
+        // Tee preserves the destination, so out.txt still appears INSIDE the
+        // tee call — but the literal "echo hi > out.txt " substring is gone.
+        assert!(
+            !out.contains("echo hi > out.txt "),
+            "the unrewritten redirect should be gone; got: {out}"
+        );
+    }
+
+    #[test]
+    fn rewrite_append_redirect_injects_tee_a_to_file() {
+        let out = rewrite("echo more >> log.txt", "main", "t1").unwrap();
+        assert!(
+            out.contains("> >(tee -a log.txt >(oby-tee --agent 'main' --tool-use-id 't1' --stream 'stdout-appended-file'"),
+            "expected tee -a + stdout-appended-file; got: {out}"
+        );
+    }
+
+    #[test]
+    fn rewrite_quoted_target_preserved() {
+        let out = rewrite(r#"echo hi > "out file.txt""#, "main", "t1").unwrap();
+        assert!(
+            out.contains(r#"tee "out file.txt""#),
+            "quoted target must be preserved verbatim; got: {out}"
+        );
+    }
+
+    #[test]
+    fn rewrite_fd_redirect_not_touched_by_v0_2() {
+        // `2> err` is FD-prefixed; v0.1's neutralize_dev_null_stderr handles
+        // 2>/dev/null specifically. A non-/dev/null FD redirect is left
+        // unchanged by both layers.
+        let out = rewrite("echo hi 2> err.txt", "main", "t1").unwrap();
+        assert!(
+            !out.contains("--stream 'stdout-to-file'"),
+            "2> err.txt is not a v0.2 redirect; got: {out}"
+        );
+        assert!(!out.contains("--stream 'stdout-appended-file'"),);
+        // The 2> err.txt substring is preserved (it falls through both passes).
+        assert!(out.contains("2> err.txt"));
+    }
+
+    #[test]
+    fn rewrite_dev_null_stderr_and_file_redirect_coexist() {
+        // v0.1's 2>/dev/null layer fires for the 2>/dev/null, v0.2's redirect
+        // layer fires for the > out.txt. Both end up in the final command.
+        let out = rewrite("cmd > out.txt 2>/dev/null", "main", "t1").unwrap();
+        assert!(out.contains("--stream stderr-discarded"));
+        assert!(out.contains("--stream 'stdout-to-file'"));
+    }
+
+    #[test]
+    fn rewrite_process_substitution_target_not_re_rewritten() {
+        // > >(...) is process substitution — scanner skips it.
+        let out = rewrite("cmd > >(some-cmd)", "main", "t1").unwrap();
+        assert!(
+            !out.contains("--stream 'stdout-to-file'"),
+            "process substitution target must not be wrapped"
         );
     }
 }

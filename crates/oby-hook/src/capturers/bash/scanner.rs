@@ -230,7 +230,6 @@ pub fn pipe_segments(s: &str) -> Vec<PipeSegment> {
 }
 
 /// File-redirect operator and target.
-#[allow(dead_code)]
 #[derive(Debug, PartialEq, Eq)]
 pub struct Redirect {
     pub kind: RedirectKind,
@@ -243,7 +242,6 @@ pub struct Redirect {
     pub target_end: usize,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
 pub enum RedirectKind {
     /// `> FILE`
@@ -256,7 +254,6 @@ pub enum RedirectKind {
 /// `2>>`, `&>`, etc.) and process substitution (`>(...)`) are intentionally
 /// excluded — those are either handled by v0.1's existing 2>/dev/null
 /// rewrite path or out of scope for v0.2.
-#[allow(dead_code)]
 pub fn redirects(s: &str) -> Vec<Redirect> {
     let bytes = s.as_bytes();
     let mut out = Vec::new();
