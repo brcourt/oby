@@ -4,9 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "PreToolUse / PostToolUse / SubagentStop hook dispatcher for oby. Routes Claude Code tool-call payloads to per-tool Capturers, rewrites Bash commands to recover discarded stdout/stderr via oby-tee, composes with peer hooks, and reports back to the oby wrapper over a unix socket."
+readme = "../../README.md"
+keywords = ["claude-code", "observability", "agent", "hook"]
+categories = ["development-tools", "command-line-utilities"]
 
 [dependencies]
-oby-core = { path = "../oby-core" }
+oby-core = { path = "../oby-core", version = "0.1.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }

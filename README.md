@@ -1,50 +1,150 @@
-# oby
+# **OB**~~servabilit~~**Y**
 
-A live, per-agent activity feed for [Claude Code](https://claude.com/claude-code) — observe what your agents are *actually* doing, including the stdout/stderr they discard inside shell pipelines (`2>/dev/null`, `| grep`, `| head`), without spending a single agent token on it.
+A live, per-agent activity feed for [Claude Code](https://claude.com/claude-code) — recovers the stdout and stderr your agents threw away (`2>/dev/null`, …) and shows it in a togglable side panel, without spending an agent token on the lookup.
 
-A wrapper (`alias claude="oby claude"`) owns your terminal; a hotkey toggles between your normal claude session and a full-screen activity feed. Each subagent gets its own routed stream, so parallel dispatch stays legible.
+Fittingly, **oby** is what's left of *observability* after the middle bytes get discarded. The wrapper does the same thing your agents' pipelines do, but keeps the parts that fell on the floor.
 
 ## Status
 
-**Working PoC.** v0.1 ships Bash + Read capturers + `2>/dev/null` discard-recovery; see [`docs/plans/v0.1.md`](docs/plans/v0.1.md) for the implementation plan. Architecture documented in [`docs/architecture.md`](docs/architecture.md); design verified against Claude Code `2.1.142` (see Appendix A).
+**v0.1 — working PoC.** Bash + Read capturers, `2>/dev/null` discard-recovery, multi-agent routing, composes with other PreToolUse hooks, mouse + keyboard scrollback, top-style metrics bar. Empirically verified against Claude Code `2.1.x`. Implementation plan: [`docs/plans/v0.1.md`](docs/plans/v0.1.md). Architecture: [`docs/architecture.md`](docs/architecture.md).
 
-## How it works (briefly)
+## How it works
 
-- A `PreToolUse` hook rewrites Bash commands to tee the bytes that would have been discarded into a per-agent unix socket — the agent's tool result stays byte-identical.
-- The harness-injected `agent_id` field routes each subagent's commands to its own stream. Main agent and concurrent subagents stay cleanly separated.
+- A `PreToolUse` hook rewrites Bash commands to tee the bytes that would have been discarded into a per-agent unix socket — the agent's tool result stays byte-identical to what it would have been.
+- The harness-injected `agent_id` field routes each subagent's commands to its own stream. Main agent and concurrent subagents are cleanly separated.
 - The wrapper owns the terminal: claude in one view, the activity feed in the other, one hotkey to swap.
-- A small plugin trait (`Capturer`) lets each observed tool — Bash, Read, Edit, Grep, Task, … — declare its own renderer in one file in the source tree. Adding a new capturer is one PR + one line in the registry.
+- A small plugin trait (`Capturer`) lets each observed tool declare its own renderer in one file in the source tree. Adding a capturer is one PR + one line in the registry.
 
-## Install (development build, v0.1)
+## Install
 
 ```bash
 git clone https://github.com/brcourt/oby
 cd oby
 cargo build --release
 export PATH="$PWD/target/release:$PATH"
-oby install              # writes hook config into ~/.claude/settings.json
-oby claude               # launches claude inside the obi wrapper
+oby install              # writes hook config to ~/.claude/settings.json
+oby claude               # launches claude inside the oby wrapper
 ```
-
-Press **Ctrl-G** at any time to toggle between the claude session and the activity feed. In the feed: ←/→ switches between agents (main + each subagent), `q` quits, Ctrl-G goes back to claude.
 
 Run plain `claude` (no wrapper) for an unobserved session — the hook env-gates itself and no-ops.
 
-### Coexistence with other PreToolUse hooks
+## CLI
 
-If you already have a PreToolUse rewriter installed (e.g. [rtk](https://github.com/anthropics/rtk)), `oby-hook` composes with it automatically. CC runs hooks in parallel and the last to finish wins the `updatedInput` race — `oby-hook` reads `~/.claude/settings.json`, invokes the peer hooks itself in array order, wraps the composed command with its own process substitution, then sleeps `OBS_COMPOSE_DELAY_MS` (default 200ms) so its emit reliably wins. Both your existing rewriter AND oby's chunk capture run.
+| Command | What it does |
+|---|---|
+| `oby claude [...args]` | Launch Claude inside the wrapper. Args pass through to `claude`. Default subcommand: `oby [args]` is treated as `oby claude [args]`. |
+| `oby install` | Write `oby-hook` entries to `~/.claude/settings.json` (PreToolUse / PostToolUse / PostToolUseFailure for Bash & Read, plus SubagentStop). Idempotent. |
+| `oby probe latest` | Print the socket dir of the most recent running oby session. |
+| `oby probe smoke [--socket-dir DIR]` | Inject synthetic hook traffic (entries, chunks, updates) into a running session. Validates the wrapper end-to-end without needing a live Claude session. |
+
+## Feed view keybinds
+
+When the feed is showing (Ctrl-G from claude):
+
+| Key | Action |
+|---|---|
+| `Ctrl-G` | Toggle back to the claude session |
+| `←` / `→` | Switch between agents (main + each subagent) |
+| `↑` / `↓` | Scroll one line |
+| `PgUp` / `PgDn` | Scroll 10 lines |
+| `Home` / `g` | Jump to oldest entry |
+| `End` / `G` | Return to live tail (auto-follow) |
+| Mouse wheel | Scroll 3 lines per tick (hold Shift to bypass capture and use terminal-native text selection) |
+| `d` or `x` | Delete the selected agent from the picker (refuses to delete `main`). Selects the agent immediately to the right; spam `d` to clear out finished subagents. |
+| `q` | Quit oby (also terminates the wrapped claude session) |
+
+The activity title shows `[scrolled +N lines · End/G to tail]` while paused, so you always know whether you're following live or browsing history.
+
+## Status dots in the agent picker
+
+- 🟢 `●` — agent is alive (still might emit events).
+- 🔴 `●` — agent is destroyed; its `SubagentStop` hook fired. Safe to delete.
+
+Main is always green while oby is running — it's the session itself, not a subagent.
+
+## Top-bar metrics
+
+The line above the title bar is a `top`-style snapshot for troubleshooting:
+
+```
+agents N · entries N · updates N (M orph) · bytes N · conns N · err A/P · fd N · up Nm
+```
+
+| Field | Meaning | Watch for |
+|---|---|---|
+| `agents` | Live agent ring count | Mismatch with subagent count = routing bug |
+| `entries` | PreToolUse Entries received | Flat while claude works = hook→wrapper broken |
+| `updates (M orph)` | PostToolUse Updates received + orphan count | Many orphans = ordering races |
+| `bytes` | Total live bytes received on agent sockets | Flat while Bash runs = `oby-tee` or rewrite broken |
+| `conns` | Total agent connections opened | Should grow with bytes |
+| `err A/P` | accept_errors / parse_errors | Non-zero A = FD pressure; non-zero P = malformed payloads |
+| `fd` | Process FD count | Climbing past ~200 = FD exhaustion incoming (listener self-heals) |
+| `up` | Wrapper uptime | Sanity check |
+
+## Environment variables
+
+| Variable | Set by | Effect |
+|---|---|---|
+| `OBS_ACTIVE` | `oby claude` | Marks a wrapped session. `oby-hook` env-gates on this — runs only when set. |
+| `OBS_SOCKET_DIR` | `oby claude` | Path to the per-session unix socket dir (`$XDG_RUNTIME_DIR/obi/<uuid>/` or `/tmp/obi/<uuid>/`). Inherited by claude → bash → `oby-tee`. |
+| `OBS_HOOK_LOG` | You | Path to a JSON-lines log file. `oby-hook` appends one line per phase per invocation (`recv`, `pre_entry`, `pre_rewrite`, `post_update`, `send_ok`, `send_connect_err`, etc.). Useful for diagnosing what CC sends and what the hook does with it. Off by default. |
+| `OBS_WRAPPER_LOG` | You | Same idea on the wrapper side. Logs every received Entry/Update, agent socket open/close (with bytes), accept errors, parse failures. Off by default. |
+| `OBS_COMPOSE_DELAY_MS` | You | Override the 200ms post-compose sleep `oby-hook` uses to win CC's "last hook to finish wins" race against peer PreToolUse rewriters (rtk etc.). Default 200; set lower if you're confident nothing else is composing on the same matcher. |
+| `OBS_COMPOSING` | `oby-hook` (internal) | Recursion guard. When `oby-hook` invokes a peer hook for composition, this var is set on the child. If `oby-hook` ever sees it on its own startup, it skips composition. Don't set manually. |
+
+## Coexistence with other PreToolUse hooks
+
+If you already have a PreToolUse rewriter installed (e.g. [rtk](https://github.com/anthropics/rtk)), `oby-hook` composes with it automatically. CC runs hooks in parallel and the last to finish wins the `updatedInput` race. `oby-hook` reads `~/.claude/settings.json`, invokes peer hooks itself in array order with the same payload, applies each emitted `updatedInput` to a working copy of `tool_input`, wraps the composed command with its own process substitution, then sleeps `OBS_COMPOSE_DELAY_MS` so its emit reliably wins. Both your existing rewriter AND oby's chunk capture run.
+
+## Diagnostics
+
+When the feed appears stuck, in order of cheapest to most expensive:
+
+1. **Glance at the top-bar metrics.** If `up Nm` is ticking, the run loop is alive. If `entries N` is incrementing, the wrapper is receiving. If `fd N` is climbing past ~200, you're approaching the per-process FD limit — the listener self-heals via accept retry but symptoms will appear first there.
+2. **Enable both debug logs and reproduce.**
+   ```bash
+   OBS_HOOK_LOG=/tmp/oby-hook.log OBS_WRAPPER_LOG=/tmp/oby-wrapper.log oby claude
+   ```
+   Then compare:
+   ```bash
+   jq -c 'select(.event | startswith("send"))' /tmp/oby-hook.log   # did delivery succeed?
+   tail -50 /tmp/oby-wrapper.log                                    # what did the wrapper see?
+   ```
+   If the hook log shows `send_connect_err` lines, the wrapper's listener went deaf. If the hook log shows `send_ok` but the wrapper log is silent, the message reached the socket but isn't being read.
+3. **Isolate the wrapper from the hook with `oby probe`.**
+   ```bash
+   # In one terminal:
+   oby claude
+   # In another:
+   oby probe smoke
+   ```
+   If the synthetic smoke entries render correctly, the wrapper (sockets, ring, TUI) is sound — bug is on the hook side.
+
+## Architecture
+
+Four crates in a Cargo workspace:
+
+| Crate | Responsibility |
+|---|---|
+| `oby-core` | Trait + types. No I/O. The plugin / wire-format contract. |
+| `oby-tee` | In-pipeline helper. Reads stdin, opens a unix socket to the wrapper, streams bytes. Fail-open. |
+| `oby-hook` | The binary CC invokes. Env-gates on `OBS_ACTIVE`, parses payloads, dispatches to the matching `Capturer`, composes with peer hooks, marshals the rewrite back to CC. |
+| `oby-cli` (binary `oby`) | The wrapper-daemon. Owns the pty, runs claude inside it, listens on per-agent unix sockets and a control socket, paints the TUI, handles the hotkey toggle. |
+
+End-to-end: CC fires PreToolUse → `oby-hook` dispatches to the capturer → capturer optionally rewrites the command to inject `oby-tee` → `oby-tee` streams bytes to a per-agent socket → wrapper's listener appends bytes to that agent's ring buffer → hotkey paints the buffer full-screen.
+
+See [`docs/architecture.md`](docs/architecture.md) for the full design.
 
 ## Known limitations (v0.1)
 
-- The Bash capturer only neutralizes `2>/dev/null`. Other inner patterns (`| grep`, `| head`, `> FILE`) ship in v0.2.
-- No xtrace / `set -x` — multi-statement scripts only surface outputs, not which command produced them.
+- Bash capturer only neutralizes `2>/dev/null`. Other inner patterns (`| grep`, `| head`, `> FILE`) ship in v0.2.
+- No execution tracing (`set -x` / `BASH_XTRACEFD`) — multi-statement scripts surface outputs but not which command produced them.
 - Only Bash and Read capturers ship. Edit, Write, Grep, Glob, Task, WebFetch tool calls don't show entries in the feed.
-- Feed scrolling is unimplemented (auto-pins to bottom).
-- Hotkey is hardcoded to **Ctrl-G**, ring buffer to 500 entries.
+- Hotkey hardcoded to Ctrl-G, ring buffer to 500 entries. Config file ships in v0.2.
 
 ## Non-goals (for now)
 
-Web UI, cross-session persistence, external user-installable plugins, and Windows support are all deferred. Execution tracing (`set -x` via `BASH_XTRACEFD`) and additional inner-pattern rewrites (`| grep`, `| head`, `> FILE`) ship in v0.2. The architecture is intentionally compatible with each (see §16 of the design doc); none are in the initial scope.
+Web UI, cross-session persistence, external user-installable plugins, and Windows support are all deferred. The architecture is intentionally compatible with each (see §16 of the design doc); none are in the initial scope.
 
 ## License
 

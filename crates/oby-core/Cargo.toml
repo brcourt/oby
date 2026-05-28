@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Core types and Capturer trait for oby — the wire-format and plugin contract shared by oby-hook, oby-tee, and the oby wrapper."
+readme = "../../README.md"
+keywords = ["claude-code", "observability", "agent", "hook"]
+categories = ["development-tools"]
 
 [dependencies]
 serde = { workspace = true }

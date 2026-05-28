@@ -4,11 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Live, per-agent activity feed for Claude Code"
+description = "Wrapper-daemon for oby. `oby claude` launches Claude Code inside a wrapped pty, listens on per-agent unix sockets for hook traffic from oby-hook + oby-tee, and paints a togglable activity feed showing every tool call (with recovered stdout/stderr that the agent's shell pipelines discarded). Installs the `oby` binary."
 readme = "../../README.md"
+keywords = ["claude-code", "observability", "agent", "tui"]
+categories = ["development-tools", "command-line-utilities"]
 
 [dependencies]
-oby-core = { path = "../oby-core" }
+oby-core = { path = "../oby-core", version = "0.1.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
