@@ -88,6 +88,166 @@ pub fn code_contains(s: &str, needle: &str) -> bool {
     false
 }
 
+/// A pipe-separated segment of a shell pipeline. `start..end` is the byte
+/// range of the segment's text (exclusive of the surrounding `|` characters).
+/// `first_word_start..first_word_end` points at the first whitespace-delimited
+/// token in the segment — typically the command name (`grep`, `head`, …).
+#[allow(dead_code)]
+#[derive(Debug, PartialEq, Eq)]
+pub struct PipeSegment {
+    pub start: usize,
+    pub end: usize,
+    pub first_word_start: usize,
+    pub first_word_end: usize,
+}
+
+/// Walk the input shell command and emit one `PipeSegment` per pipe stage.
+/// A two-stage pipeline `cmd1 | cmd2` produces two segments; a single
+/// command produces one. Pipes inside quotes, comments, parentheses,
+/// `$( … )` command substitution, backticks, or `[[ … ]]` test expressions
+/// are excluded — they're part of the surrounding segment, not separators.
+/// The logical-or operator `||` is NOT treated as a pipe.
+#[allow(dead_code)]
+pub fn pipe_segments(s: &str) -> Vec<PipeSegment> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    let mut seg_start = 0usize;
+
+    // Nesting depth counters. We treat a non-zero depth as "do not emit
+    // a pipe even if you see a `|`."
+    let mut paren_depth: u32 = 0; // ( ... ) and $( ... )
+    let mut bracket_depth: u32 = 0; // [[ ... ]]
+    let mut backtick_depth: u32 = 0; // ` ... `
+
+    let flush = |out: &mut Vec<PipeSegment>, s: &str, start: usize, end: usize| {
+        let (fw_start, fw_end) = first_word(s, start, end);
+        out.push(PipeSegment {
+            start,
+            end,
+            first_word_start: fw_start,
+            first_word_end: fw_end,
+        });
+    };
+
+    while i < bytes.len() {
+        let c = bytes[i];
+        match c {
+            b'\'' => {
+                // Single-quoted string: no escapes, just find the next `'`.
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'\'' {
+                    i += 1;
+                }
+                if i < bytes.len() {
+                    i += 1;
+                }
+            }
+            b'"' => {
+                // Double-quoted string: support `\` escapes.
+                i += 1;
+                while i < bytes.len() {
+                    match bytes[i] {
+                        b'\\' if i + 1 < bytes.len() => i += 2,
+                        b'"' => {
+                            i += 1;
+                            break;
+                        }
+                        _ => i += 1,
+                    }
+                }
+            }
+            b'#' => {
+                // Comment-to-EOL only when preceded by whitespace or start-of-cmd
+                // or a shell separator (matches code_spans behavior).
+                let prev_is_ws =
+                    i == 0 || matches!(bytes[i - 1], b' ' | b'\t' | b'\n' | b';' | b'|' | b'&');
+                if prev_is_ws {
+                    while i < bytes.len() && bytes[i] != b'\n' {
+                        i += 1;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            b'$' if i + 1 < bytes.len() && bytes[i + 1] == b'(' => {
+                // Command substitution `$( ... )`. Open a paren depth.
+                paren_depth += 1;
+                i += 2;
+            }
+            b'(' => {
+                paren_depth += 1;
+                i += 1;
+            }
+            b')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+                i += 1;
+            }
+            b'[' if i + 1 < bytes.len() && bytes[i + 1] == b'[' => {
+                bracket_depth += 1;
+                i += 2;
+            }
+            b']' if i + 1 < bytes.len() && bytes[i + 1] == b']' => {
+                bracket_depth = bracket_depth.saturating_sub(1);
+                i += 2;
+            }
+            b'`' => {
+                if backtick_depth == 0 {
+                    backtick_depth = 1;
+                } else {
+                    backtick_depth = 0;
+                }
+                i += 1;
+            }
+            b'|' if paren_depth == 0
+                && bracket_depth == 0
+                && backtick_depth == 0
+                && i + 1 < bytes.len()
+                && bytes[i + 1] != b'|' =>
+            {
+                // Real pipe separator. Emit the segment ending at this `|`.
+                flush(&mut out, s, seg_start, i);
+                i += 1;
+                // Skip whitespace so seg_start lands on the next command.
+                while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
+                    i += 1;
+                }
+                seg_start = i;
+            }
+            b'|' => {
+                // Either `||` (logical or, skip both bytes) or inside a nesting
+                // context. Either way, advance past this byte.
+                if i + 1 < bytes.len() && bytes[i + 1] == b'|' {
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    // Flush the final segment.
+    flush(&mut out, s, seg_start, bytes.len());
+    out
+}
+
+/// Find the first whitespace-delimited word in `s[start..end]`. Returns
+/// (word_start, word_end) — byte offsets into `s`. If the slice is all
+/// whitespace, returns (end, end).
+fn first_word(s: &str, start: usize, end: usize) -> (usize, usize) {
+    let bytes = s.as_bytes();
+    let mut i = start;
+    while i < end && (bytes[i] == b' ' || bytes[i] == b'\t' || bytes[i] == b'\n') {
+        i += 1;
+    }
+    let word_start = i;
+    while i < end && bytes[i] != b' ' && bytes[i] != b'\t' && bytes[i] != b'\n' && bytes[i] != b';'
+    {
+        i += 1;
+    }
+    (word_start, i)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,5 +291,96 @@ mod tests {
     fn code_contains_ignores_quoted_matches() {
         assert!(!code_contains("echo 'foo 2>/dev/null bar'", "2>/dev/null"));
         assert!(code_contains("ls 2>/dev/null", "2>/dev/null"));
+    }
+
+    fn first_words(s: &str) -> Vec<&str> {
+        pipe_segments(s)
+            .into_iter()
+            .map(|seg| &s[seg.first_word_start..seg.first_word_end])
+            .collect()
+    }
+
+    #[test]
+    fn pipe_segments_single_command_one_segment() {
+        let segs = pipe_segments("ls -la /tmp");
+        assert_eq!(segs.len(), 1);
+        assert_eq!(first_words("ls -la /tmp"), vec!["ls"]);
+    }
+
+    #[test]
+    fn pipe_segments_two_stage_pipeline() {
+        let segs = pipe_segments("ls | grep foo");
+        assert_eq!(segs.len(), 2);
+        assert_eq!(first_words("ls | grep foo"), vec!["ls", "grep"]);
+    }
+
+    #[test]
+    fn pipe_segments_three_stage_pipeline() {
+        assert_eq!(
+            first_words("cat /etc/hosts | grep 127 | head -n 5"),
+            vec!["cat", "grep", "head"]
+        );
+    }
+
+    #[test]
+    fn pipe_segments_logical_or_is_one_segment() {
+        // `||` is logical-or, NOT a pipe. The whole thing is one segment.
+        let segs = pipe_segments("ls /nope || echo fallback");
+        assert_eq!(segs.len(), 1);
+    }
+
+    #[test]
+    fn pipe_segments_pipe_in_single_quote_excluded() {
+        let segs = pipe_segments("echo 'a | b' | grep foo");
+        // The `|` inside '...' is text, not a pipe; the second `|` is real.
+        assert_eq!(segs.len(), 2);
+        assert_eq!(first_words("echo 'a | b' | grep foo"), vec!["echo", "grep"]);
+    }
+
+    #[test]
+    fn pipe_segments_pipe_in_double_quote_excluded() {
+        let segs = pipe_segments(r#"echo "a | b" | grep foo"#);
+        assert_eq!(segs.len(), 2);
+    }
+
+    #[test]
+    fn pipe_segments_pipe_in_comment_excluded() {
+        let segs = pipe_segments("echo ok # a | b");
+        assert_eq!(segs.len(), 1);
+    }
+
+    #[test]
+    fn pipe_segments_pipe_in_parens_excluded() {
+        // The pipe inside (...) is a subshell pipe; outer scanner sees one segment.
+        let segs = pipe_segments("(echo a | grep b)");
+        assert_eq!(segs.len(), 1);
+    }
+
+    #[test]
+    fn pipe_segments_pipe_in_command_substitution_excluded() {
+        let segs = pipe_segments("echo $(cat foo | wc -l)");
+        assert_eq!(segs.len(), 1);
+    }
+
+    #[test]
+    fn pipe_segments_pipe_in_backticks_excluded() {
+        let segs = pipe_segments("echo `cat foo | wc -l`");
+        assert_eq!(segs.len(), 1);
+    }
+
+    #[test]
+    fn pipe_segments_fd_prefixed_pipe_still_pipe() {
+        // `2>` is a redirect operator, but `|` between commands is always a pipe
+        // regardless of any prefix. This is a sanity check.
+        assert_eq!(first_words("cmd 2>err | grep foo"), vec!["cmd", "grep"]);
+    }
+
+    #[test]
+    fn pipe_segments_first_word_skips_leading_whitespace() {
+        let segs = pipe_segments("ls |    grep foo");
+        assert_eq!(segs.len(), 2);
+        let s = "ls |    grep foo";
+        // Second segment's first word starts at the 'g' of 'grep', not at the space.
+        assert_eq!(&s[segs[1].first_word_start..segs[1].first_word_end], "grep");
     }
 }
