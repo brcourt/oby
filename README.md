@@ -17,11 +17,30 @@ Fittingly, **oby** is what's left of *observability* after the middle bytes get 
 
 ## Install
 
+Homebrew (macOS):
+
+```bash
+brew install brcourt/tap/oby
+```
+
+Cargo:
+
+```bash
+cargo install oby-cli oby-hook oby-tee
+```
+
+From source:
+
 ```bash
 git clone https://github.com/brcourt/oby
 cd oby
 cargo build --release
 export PATH="$PWD/target/release:$PATH"
+```
+
+Then, in any of those:
+
+```bash
 oby install              # writes hook config to ~/.claude/settings.json
 oby claude               # launches claude inside the oby wrapper
 ```
