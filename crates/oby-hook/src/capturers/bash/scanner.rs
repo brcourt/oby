@@ -334,9 +334,27 @@ pub fn redirects(s: &str) -> Vec<Redirect> {
                     i += 1;
                     continue;
                 }
+                // Reject `&>` / `&>>`: bash combined stdout+stderr redirect. Deferred to
+                // v0.3+ per spec; the scanner emits no marker so the rewriter passes
+                // through unchanged. Advance past the full operator (both `>` in `&>>`)
+                // so the second `>` is not picked up on the next iteration.
+                let preceded_by_amp = i > 0 && bytes[i - 1] == b'&';
+                if preceded_by_amp {
+                    // Skip `>` or `>>`.
+                    let amp_is_append = i + 1 < bytes.len() && bytes[i + 1] == b'>';
+                    i += if amp_is_append { 2 } else { 1 };
+                    continue;
+                }
                 let is_append = i + 1 < bytes.len() && bytes[i + 1] == b'>';
                 let op_start = i;
                 let op_end = if is_append { i + 2 } else { i + 1 };
+                // Reject `>&` / `>>&` (fd duplication, e.g. `>&2`): treating it as a
+                // file redirect would orphan `&N` in the output and break the shell.
+                let followed_by_amp = op_end < bytes.len() && bytes[op_end] == b'&';
+                if followed_by_amp {
+                    i = op_end;
+                    continue;
+                }
                 // Reject `> >(...)` process substitution: peek past whitespace
                 // for an unquoted `(`.
                 let mut probe = op_end;
@@ -658,5 +676,47 @@ mod tests {
     fn redirects_inside_command_substitution_excluded() {
         let r = redirects("echo $(cat > /tmp/x)");
         assert!(r.is_empty());
+    }
+
+    #[test]
+    fn redirects_ampersand_before_excluded() {
+        // `&>` is a bash combined stdout+stderr redirect; spec defers to v0.3+
+        // and requires the scanner to leave it alone (passthrough).
+        let r = redirects("cmd &> log.txt");
+        assert!(
+            r.is_empty(),
+            "&> must not be emitted as a redirect; got: {r:?}"
+        );
+    }
+
+    #[test]
+    fn redirects_ampersand_before_append_excluded() {
+        let r = redirects("cmd &>> log.txt");
+        assert!(
+            r.is_empty(),
+            "&>> must not be emitted as a redirect; got: {r:?}"
+        );
+    }
+
+    #[test]
+    fn redirects_ampersand_after_excluded() {
+        // `>&N` is a bash fd-duplication operator (redirect stdout to fd N).
+        // Treating it as a file redirect leaves `&N` orphaned in the rewritten
+        // command and produces broken shell. The scanner must skip it.
+        let r = redirects("cmd >&2");
+        assert!(
+            r.is_empty(),
+            ">&2 must not be emitted as a redirect; got: {r:?}"
+        );
+    }
+
+    #[test]
+    fn redirects_append_then_ampersand_excluded() {
+        // `>>&` is unusual but follows the same fd-duplication pattern.
+        let r = redirects("cmd >>&2");
+        assert!(
+            r.is_empty(),
+            ">>&2 must not be emitted as a redirect; got: {r:?}"
+        );
     }
 }

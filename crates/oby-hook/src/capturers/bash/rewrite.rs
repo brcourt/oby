@@ -396,4 +396,33 @@ mod tests {
         assert!(out.contains("--stream 'stdout'"));
         assert!(out.contains("--stream 'stderr'"));
     }
+
+    #[test]
+    fn rewrite_ampersand_combined_redirect_not_touched() {
+        // `&>` is deferred to v0.3+; the rewriter must leave it alone.
+        let out = rewrite("echo hi &> log.txt", "main", "t1").unwrap();
+        assert!(
+            out.contains("echo hi &> log.txt"),
+            "&> must pass through; got: {out}"
+        );
+        assert!(
+            !out.contains("--stream 'stdout-to-file'"),
+            "&> must not be wrapped; got: {out}"
+        );
+    }
+
+    #[test]
+    fn rewrite_fd_duplication_not_touched() {
+        // `>&2` is fd duplication; rewriting it would orphan `&2` in the
+        // output and crash the shell. The rewriter must leave it alone.
+        let out = rewrite("echo error >&2", "main", "t1").unwrap();
+        assert!(
+            out.contains("echo error >&2"),
+            ">&2 must pass through; got: {out}"
+        );
+        assert!(
+            !out.contains("--stream 'stdout-to-file'"),
+            ">&2 must not be wrapped; got: {out}"
+        );
+    }
 }
