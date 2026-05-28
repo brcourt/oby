@@ -40,6 +40,7 @@ fn main() -> ExitCode {
 }
 
 mod install;
+mod key;
 mod pty;
 mod ring;
 mod run;
