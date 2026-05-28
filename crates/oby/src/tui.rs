@@ -47,15 +47,15 @@ pub fn render<B: Backend>(
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1), // title bar
                 Constraint::Length(1), // metrics bar
+                Constraint::Length(1), // title bar
                 Constraint::Min(1),    // entries
                 Constraint::Length(3), // agent picker
             ])
             .split(size);
 
-        f.render_widget(header(view), chunks[0]);
-        f.render_widget(metrics_bar(metrics, buffers), chunks[1]);
+        f.render_widget(metrics_bar(metrics, buffers), chunks[0]);
+        f.render_widget(header(view), chunks[1]);
         let ring = buffers.get(&view.selected_agent);
         f.render_widget(entries_block(ring), chunks[2]);
         f.render_widget(agent_picker(buffers, &view.selected_agent), chunks[3]);
