@@ -52,11 +52,14 @@ async fn run_async(rest: Vec<String>, socket_dir: PathBuf) -> Result<()> {
 
     let (cols, rows) = crossterm::terminal::size()?;
     enable_raw_mode()?;
-    execute!(
-        std::io::stdout(),
-        EnterAlternateScreen,
-        EnableBracketedPaste
-    )?;
+    // Don't EnterAlternateScreen at startup — claude uses its own alt-screen
+    // internally, and most terminals' "scrollback in alt-screen" feature only
+    // works for the *first* alt-screen entry. If we enter first, claude's
+    // entry becomes a nested one and the terminal disables scrollback. By
+    // staying in the main buffer here, claude's alt-screen entry is the
+    // primary one and the terminal preserves scrollback as if you ran claude
+    // unwrapped. We enter alt-screen only when toggling to the feed view.
+    execute!(std::io::stdout(), EnableBracketedPaste)?;
     let _term_guard = TerminalGuard;
     let backend = ratatui::backend::CrosstermBackend::new(std::io::stdout());
     let mut term = ratatui::Terminal::new(backend)?;
@@ -115,14 +118,12 @@ async fn run_async(rest: Vec<String>, socket_dir: PathBuf) -> Result<()> {
                         let new_state = current.toggle();
                         *view_state.lock().unwrap() = new_state;
                         if new_state == ViewState::Claude {
-                            // Wipe the screen, then force claude to repaint via a
-                            // size change. SIGWINCH alone is a no-op for most TUIs
-                            // when the size hasn't changed — shrink+restore reliably
-                            // triggers their resize handlers.
-                            execute!(
-                                std::io::stdout(),
-                                crossterm::terminal::Clear(crossterm::terminal::ClearType::All)
-                            )?;
+                            // Leaving the feed: restore the main buffer (claude's
+                            // TUI from before we entered alt-screen) and force a
+                            // resize-based repaint in case claude wrote anything
+                            // in between (the reader thread discards bytes in
+                            // feed view, so the main buffer is stale).
+                            execute!(std::io::stdout(), LeaveAlternateScreen)?;
                             let (cur_cols, cur_rows) =
                                 crossterm::terminal::size().unwrap_or((cols, rows));
                             let shrunk = cur_rows.saturating_sub(1).max(1);
@@ -140,9 +141,11 @@ async fn run_async(rest: Vec<String>, socket_dir: PathBuf) -> Result<()> {
                                 pixel_height: 0,
                             });
                         } else {
-                            // Invalidate ratatui's diff buffer so the first feed
-                            // frame paints every cell (otherwise claude's residue
-                            // shows through where the feed has unchanged cells).
+                            // Entering the feed: switch to alt-screen so claude's
+                            // TUI is stashed by the terminal, then invalidate
+                            // ratatui's diff buffer so the first feed frame paints
+                            // every cell.
+                            execute!(std::io::stdout(), EnterAlternateScreen)?;
                             term.clear()?;
                         }
                     }

@@ -23,6 +23,11 @@ pub fn spawn_claude(rest: Vec<String>, cols: u16, rows: u16) -> Result<PtySessio
     for arg in rest {
         cmd.arg(arg);
     }
+    // CommandBuilder defaults to $HOME (or /); inherit the caller's cwd so
+    // `oby claude` from inside a project starts claude in that project.
+    if let Ok(cwd) = std::env::current_dir() {
+        cmd.cwd(cwd);
+    }
     let child = pair
         .slave
         .spawn_command(cmd)
