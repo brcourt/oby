@@ -45,6 +45,7 @@ mod pty;
 mod ring;
 mod run;
 mod sockets;
+mod tui;
 
 #[cfg(test)]
 mod tests {
