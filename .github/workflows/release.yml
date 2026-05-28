@@ -1,0 +1,39 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  source-tarball:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository at tag
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build pinned source tarball
+        run: |
+          TAG=${GITHUB_REF#refs/tags/}
+          VERSION=${TAG#v}
+          ARCHIVE="oby-${VERSION}.tar.gz"
+          git archive --format=tar.gz --prefix="oby-${VERSION}/" "${TAG}" > "${ARCHIVE}"
+          echo "ARCHIVE=${ARCHIVE}" >> "${GITHUB_ENV}"
+          echo "VERSION=${VERSION}" >> "${GITHUB_ENV}"
+          shasum -a 256 "${ARCHIVE}"
+
+      - name: Create or update the release with the tarball asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "${{ github.ref_name }}" >/dev/null 2>&1; then
+            gh release upload "${{ github.ref_name }}" "${ARCHIVE}" --clobber
+          else
+            gh release create "${{ github.ref_name }}" "${ARCHIVE}" \
+              --title "${{ github.ref_name }}" \
+              --notes "Automated release. See CHANGELOG / commit log for details."
+          fi
