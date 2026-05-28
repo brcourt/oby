@@ -9,8 +9,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use nix::sys::signal::{kill, Signal};
-use nix::unistd::Pid;
+use portable_pty::PtySize;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -19,6 +18,13 @@ use std::time::Duration;
 use uuid::Uuid;
 
 pub fn run(rest: Vec<String>) -> ExitCode {
+    // Set env BEFORE the multi-threaded tokio runtime starts. std::env::set_var
+    // is unsound once worker threads exist.
+    let session_id = Uuid::new_v4().simple().to_string();
+    let socket_dir = runtime_dir().join("obi").join(session_id);
+    std::env::set_var("OBS_ACTIVE", "1");
+    std::env::set_var("OBS_SOCKET_DIR", &socket_dir);
+
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -29,7 +35,7 @@ pub fn run(rest: Vec<String>) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match rt.block_on(run_async(rest)) {
+    match rt.block_on(run_async(rest, socket_dir)) {
         Ok(_) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("oby: {e:#}");
@@ -38,42 +44,29 @@ pub fn run(rest: Vec<String>) -> ExitCode {
     }
 }
 
-async fn run_async(rest: Vec<String>) -> Result<()> {
-    // 1) Set up socket dir + env.
-    let session_id = Uuid::new_v4().simple().to_string();
-    let socket_dir = runtime_dir().join("obi").join(session_id);
-    std::env::set_var("OBS_ACTIVE", "1");
-    std::env::set_var("OBS_SOCKET_DIR", &socket_dir);
+async fn run_async(rest: Vec<String>, socket_dir: PathBuf) -> Result<()> {
     let _cleanup = SocketDirCleanup(socket_dir.clone());
 
-    // 2) Start listeners.
     let buffers = Arc::new(Mutex::new(AllAgentBuffers::default()));
-    spawn_listeners(socket_dir.clone(), buffers.clone()).await?;
+    spawn_listeners(socket_dir, buffers.clone()).await?;
 
-    // 3) Enter raw mode + alt screen.
     let (cols, rows) = crossterm::terminal::size()?;
     enable_raw_mode()?;
-    let mut stdout = std::io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let backend = ratatui::backend::CrosstermBackend::new(stdout);
+    execute!(std::io::stdout(), EnterAlternateScreen)?;
+    let _term_guard = TerminalGuard;
+    let backend = ratatui::backend::CrosstermBackend::new(std::io::stdout());
     let mut term = ratatui::Terminal::new(backend)?;
 
-    // 4) Spawn claude in pty.
     let mut pty = spawn_claude(rest, cols, rows)?;
-    let claude_pid = pty.child.process_id();
     let child_done = watch_child(std::mem::replace(&mut pty.child, dummy_child()));
 
-    // 5) Set up pty reader/writer.
     let mut master_reader = pty.pair.master.try_clone_reader()?;
     let mut master_writer = pty.pair.master.take_writer()?;
 
-    // 6) State.
-    let mut view_state = ViewState::Claude;
+    let view_state = Arc::new(Mutex::new(ViewState::Claude));
     let mut feed = FeedView::default();
 
-    // Pump pty output to terminal in a background thread.
-    let view_state_shared = Arc::new(Mutex::new(view_state));
-    let view_state_for_reader = view_state_shared.clone();
+    let view_state_reader = view_state.clone();
     std::thread::spawn(move || {
         let mut buf = [0u8; 8192];
         let mut out = std::io::stdout();
@@ -81,70 +74,80 @@ async fn run_async(rest: Vec<String>) -> Result<()> {
             match master_reader.read(&mut buf) {
                 Ok(0) | Err(_) => return,
                 Ok(n) => {
-                    if *view_state_for_reader.lock().unwrap() == ViewState::Claude {
+                    if *view_state_reader.lock().unwrap() == ViewState::Claude {
                         let _ = out.write_all(&buf[..n]);
                         let _ = out.flush();
                     }
-                    // When feed view is active, we discard claude's bytes (next time we
-                    // flip back we'll SIGWINCH and claude repaints).
                 }
             }
         }
     });
 
-    // 7) Main input loop.
     loop {
-        // If claude exited, leave.
         if child_done.try_recv().is_ok() {
             break;
         }
 
-        // Tick rate: render the feed at ~30Hz when active.
-        if view_state == ViewState::Feed {
+        let current = *view_state.lock().unwrap();
+        if current == ViewState::Feed {
             render(&mut term, &feed, &buffers.lock().unwrap())?;
         }
 
         if event::poll(Duration::from_millis(33))? {
             if let Event::Key(key) = event::read()? {
-                match decide(key, view_state) {
+                match decide(key, current) {
                     InputDecision::ToggleView => {
-                        view_state = view_state.toggle();
-                        *view_state_shared.lock().unwrap() = view_state;
-                        if view_state == ViewState::Claude {
-                            // Force claude to repaint its full screen.
-                            if let Some(pid) = claude_pid {
-                                let _ = kill(Pid::from_raw(pid as i32), Signal::SIGWINCH);
-                            }
-                            // Clear the screen so the alt-screen reveals claude cleanly.
+                        let new_state = current.toggle();
+                        *view_state.lock().unwrap() = new_state;
+                        if new_state == ViewState::Claude {
+                            // Wipe the screen, then force claude to repaint via a
+                            // size change. SIGWINCH alone is a no-op for most TUIs
+                            // when the size hasn't changed — shrink+restore reliably
+                            // triggers their resize handlers.
                             execute!(
                                 std::io::stdout(),
                                 crossterm::terminal::Clear(crossterm::terminal::ClearType::All)
                             )?;
+                            let (cur_cols, cur_rows) =
+                                crossterm::terminal::size().unwrap_or((cols, rows));
+                            let shrunk = cur_rows.saturating_sub(1).max(1);
+                            let _ = pty.pair.master.resize(PtySize {
+                                rows: shrunk,
+                                cols: cur_cols,
+                                pixel_width: 0,
+                                pixel_height: 0,
+                            });
+                            tokio::time::sleep(Duration::from_millis(50)).await;
+                            let _ = pty.pair.master.resize(PtySize {
+                                rows: cur_rows,
+                                cols: cur_cols,
+                                pixel_width: 0,
+                                pixel_height: 0,
+                            });
+                        } else {
+                            // Invalidate ratatui's diff buffer so the first feed
+                            // frame paints every cell (otherwise claude's residue
+                            // shows through where the feed has unchanged cells).
+                            term.clear()?;
                         }
                     }
                     InputDecision::Forward(bytes) => {
-                        if view_state == ViewState::Claude && !bytes.is_empty() {
+                        if current == ViewState::Claude && !bytes.is_empty() {
                             master_writer.write_all(&bytes)?;
                             master_writer.flush()?;
                         }
                     }
-                    InputDecision::NavigateFeed(nav) => {
-                        match nav {
-                            FeedNav::AgentPrev => feed.cycle_agent(&buffers.lock().unwrap(), -1),
-                            FeedNav::AgentNext => feed.cycle_agent(&buffers.lock().unwrap(), 1),
-                            FeedNav::Quit => break,
-                            // v0.1 scrolling is unimplemented (ratatui list auto-scrolls to bottom).
-                            FeedNav::ScrollUp | FeedNav::ScrollDown => {}
-                        }
-                    }
+                    InputDecision::NavigateFeed(nav) => match nav {
+                        FeedNav::AgentPrev => feed.cycle_agent(&buffers.lock().unwrap(), -1),
+                        FeedNav::AgentNext => feed.cycle_agent(&buffers.lock().unwrap(), 1),
+                        FeedNav::Quit => break,
+                        FeedNav::ScrollUp | FeedNav::ScrollDown => {}
+                    },
                 }
             }
         }
     }
 
-    // 8) Restore terminal.
-    disable_raw_mode()?;
-    execute!(std::io::stdout(), LeaveAlternateScreen)?;
     Ok(())
 }
 
@@ -162,7 +165,14 @@ impl Drop for SocketDirCleanup {
     }
 }
 
-// Placeholder child for when we move the real one into watch_child().
+struct TerminalGuard;
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
+    }
+}
+
 fn dummy_child() -> Box<dyn portable_pty::Child + Send + Sync> {
     #[derive(Debug)]
     struct Dummy;

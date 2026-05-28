@@ -16,7 +16,6 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 clap = { workspace = true }
-nix = { workspace = true }
 crossterm = { workspace = true }
 ratatui = { workspace = true }
 portable-pty = { workspace = true }
