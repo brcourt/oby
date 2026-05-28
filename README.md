@@ -1,8 +1,8 @@
-# obi-tee
+# oby
 
 A live, per-agent activity feed for [Claude Code](https://claude.com/claude-code) — observe what your agents are *actually* doing, including the stdout/stderr they discard inside shell pipelines (`2>/dev/null`, `| grep`, `| head`), without spending a single agent token on it.
 
-A wrapper (`alias claude="obi-tee claude"`) owns your terminal; a hotkey toggles between your normal claude session and a full-screen activity feed. Each subagent gets its own routed stream, so parallel dispatch stays legible.
+A wrapper (`alias claude="oby claude"`) owns your terminal; a hotkey toggles between your normal claude session and a full-screen activity feed. Each subagent gets its own routed stream, so parallel dispatch stays legible.
 
 ## Status
 

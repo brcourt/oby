@@ -1,4 +1,4 @@
-# obi-tee — Architecture
+# oby — Architecture
 
 **Date:** 2026-05-27
 **Status:** Design. Pre-implementation.
@@ -36,7 +36,7 @@ Three derived rules that anchor every design choice:
 - Recover **bytes the agent discards inside its shell pipelines** (`2>/dev/null`, `| grep`, `| head`) by rewriting the command to tee the would-be-discarded streams into a per-agent socket. The agent's tool result stays byte-identical.
 - Visibility into **what multi-statement scripts actually do**, not just their output — execution tracing (xtrace) captures each command a script runs, including iterations of `for`/`while` loops where individual commands produce no output (§10.6).
 - Per-agent streams. Main agent and each subagent get their own activity log, routed by `agent_id`. Concurrent subagents stay separate.
-- Single-window UX. A wrapper (`alias claude="obi-tee claude"`) owns the terminal; a hotkey toggles between the agent's claude TUI and the activity feed.
+- Single-window UX. A wrapper (`alias claude="oby claude"`) owns the terminal; a hotkey toggles between the agent's claude TUI and the activity feed.
 - Plugin-based capturers. Each tool's observation logic is one module in the source tree. Adding a new capturer is one PR + one line in the registry.
 - Open-source (MIT), single static Rust binary distribution.
 
@@ -58,11 +58,11 @@ Three derived rules that anchor every design choice:
 
 ```
 ┌────────────────────────────────────────────────────────────────────┐
-│  Terminal (owned by obi-wrapper)                                   │
+│  Terminal (owned by oby)                                           │
 │                                                                    │
 │  ┌──────────────────────────────────────────────────────────────┐  │
 │  │  claude TUI                       (toggled view: activity)   │  │
-│  │  (rendered into a pty obi-wrapper allocates)                 │  │
+│  │  (rendered into a pty oby allocates)                         │  │
 │  └──────────────────────────────────────────────────────────────┘  │
 │                                                                    │
 │  hotkey ──► swap rendered view (claude ↔ activity feed)            │
@@ -72,7 +72,7 @@ Three derived rules that anchor every design choice:
             sets env      │ keeps per-agent ring buffers
                           ▼
                 ┌──────────────────────┐
-                │      obi-wrapper     │
+                │         oby          │
                 │  (the wrapper+daemon │
                 │   in one process)    │
                 └─────────┬────────────┘
@@ -87,27 +87,27 @@ Three derived rules that anchor every design choice:
    │     command        │     │      command       │
    │ ┌────────────────┐ │     │ ┌────────────────┐ │
    │ │ rewritten by   │ │     │ │ rewritten by   │ │
-   │ │   obi-hook     │ │     │ │   obi-hook     │ │
+   │ │   oby-hook     │ │     │ │   oby-hook     │ │
    │ └───────┬────────┘ │     │ └───────┬────────┘ │
    │         │          │     │         │          │
    │       │ tee ──►    │     │       │ tee ──►    │
    │         ▼          │     │         ▼          │
-   │       obi-tee      │     │       obi-tee      │
+   │       oby-tee      │     │       oby-tee      │
    │   (fail-open helper)     │   (fail-open helper)│
    └────────────────────┘     └────────────────────┘
 ```
 
-`claude` is launched by `obi-wrapper`, which sets `OBS_ACTIVE=1` + `OBS_SOCKET_DIR=…` in env and then execs claude in the allocated pty. `obi-hook` is installed once, globally, in `~/.claude/settings.json`; it is env-gated and no-ops when `OBS_ACTIVE` is unset, so running plain `claude` is byte-for-byte unaffected.
+`claude` is launched by `oby`, which sets `OBS_ACTIVE=1` + `OBS_SOCKET_DIR=…` in env and then execs claude in the allocated pty. `oby-hook` is installed once, globally, in `~/.claude/settings.json`; it is env-gated and no-ops when `OBS_ACTIVE` is unset, so running plain `claude` is byte-for-byte unaffected.
 
 End-to-end data flow for one Bash command:
 
 1. Agent calls Bash with `cmd | grep ERROR`.
 2. CC fires PreToolUse hook with the payload (including `agent_id` if subagent).
-3. `obi-hook` looks up the Bash capturer, calls `pre_rewrite(ctx, input)`.
-4. The Bash capturer returns a rewritten command: `cmd | tee >(obi-tee --agent KEY --tool-use-id TID --stream stdout-piped >/dev/null) | grep ERROR`.
-5. `obi-hook` also sends a `DisplayEntry` (the command, headline, agent_key, pending status) to the wrapper-daemon via its control socket.
-6. `obi-hook` emits the JSON envelope on stdout to mutate `tool_input.command`. CC runs the rewritten command.
-7. Inside the rewritten pipeline, `obi-tee` connects to `$OBS_SOCKET_DIR/<agent_key>.sock`, identifies itself with the tool_use_id, streams bytes.
+3. `oby-hook` looks up the Bash capturer, calls `pre_rewrite(ctx, input)`.
+4. The Bash capturer returns a rewritten command: `cmd | tee >(oby-tee --agent KEY --tool-use-id TID --stream stdout-piped >/dev/null) | grep ERROR`.
+5. `oby-hook` also sends a `DisplayEntry` (the command, headline, agent_key, pending status) to the wrapper-daemon via its control socket.
+6. `oby-hook` emits the JSON envelope on stdout to mutate `tool_input.command`. CC runs the rewritten command.
+7. Inside the rewritten pipeline, `oby-tee` connects to `$OBS_SOCKET_DIR/<agent_key>.sock`, identifies itself with the tool_use_id, streams bytes.
 8. The wrapper appends the bytes to the entry's `LiveStream` body, bound by tool_use_id.
 9. Command finishes. PostToolUse fires. The Bash capturer's `render_post` updates status (Ok / Error). The wrapper finalizes the entry.
 
@@ -115,7 +115,7 @@ End-to-end data flow for one Bash command:
 
 ## 5. Components
 
-### 5.1 `obi-wrapper` — the wrapper + daemon, collapsed
+### 5.1 `oby` — the wrapper + daemon, collapsed
 
 A single binary that:
 
@@ -130,7 +130,7 @@ A single binary that:
 
 The wrapper is the listener — no external daemon. This is the **collapsed** topology (PoC). The seam to a future split daemon is in §16.
 
-### 5.2 `obi-hook` — the binary CC invokes
+### 5.2 `oby-hook` — the binary CC invokes
 
 Tiny binary configured in `~/.claude/settings.json`, with one entry per observed tool:
 
@@ -138,20 +138,20 @@ Tiny binary configured in `~/.claude/settings.json`, with one entry per observed
 {
   "hooks": {
     "PreToolUse": [
-      { "matcher": "Bash", "hooks": [{ "type": "command", "command": "obi-hook" }] },
-      { "matcher": "Read", "hooks": [{ "type": "command", "command": "obi-hook" }] },
-      { "matcher": "Edit", "hooks": [{ "type": "command", "command": "obi-hook" }] }
+      { "matcher": "Bash", "hooks": [{ "type": "command", "command": "oby-hook" }] },
+      { "matcher": "Read", "hooks": [{ "type": "command", "command": "oby-hook" }] },
+      { "matcher": "Edit", "hooks": [{ "type": "command", "command": "oby-hook" }] }
     ],
     "PostToolUse": [
-      { "matcher": "Bash", "hooks": [{ "type": "command", "command": "obi-hook" }] },
-      { "matcher": "Read", "hooks": [{ "type": "command", "command": "obi-hook" }] },
-      { "matcher": "Edit", "hooks": [{ "type": "command", "command": "obi-hook" }] }
+      { "matcher": "Bash", "hooks": [{ "type": "command", "command": "oby-hook" }] },
+      { "matcher": "Read", "hooks": [{ "type": "command", "command": "oby-hook" }] },
+      { "matcher": "Edit", "hooks": [{ "type": "command", "command": "oby-hook" }] }
     ]
   }
 }
 ```
 
-One entry per observed tool (truncated above — full install adds Write, Grep, Glob, Task, WebFetch). `obi-hook` dispatches internally by `tool_name` to the matching capturer; the matchers just select what fires the hook. If CC's current version supports a wildcard matcher (e.g. `".*"` regex), the install can collapse to one entry per event — to be verified during implementation against the target CC version. Explicit per-tool matchers are empirically confirmed to work (RTK uses this form).
+One entry per observed tool (truncated above — full install adds Write, Grep, Glob, Task, WebFetch). `oby-hook` dispatches internally by `tool_name` to the matching capturer; the matchers just select what fires the hook. If CC's current version supports a wildcard matcher (e.g. `".*"` regex), the install can collapse to one entry per event — to be verified during implementation against the target CC version. Explicit per-tool matchers are empirically confirmed to work (RTK uses this form).
 
 On every invocation:
 
@@ -162,12 +162,12 @@ On every invocation:
 5. **Send display entries to the wrapper.** Fire-and-forget over the wrapper's control socket. Failure = silent.
 6. **Emit rewrite JSON** if PreToolUse and Rewrite returned. Otherwise stdout is empty.
 
-### 5.3 `obi-tee` — the in-pipeline helper
+### 5.3 `oby-tee` — the in-pipeline helper
 
 A small Rust binary (~150 lines) used only by the Bash capturer's rewrites:
 
 ```
-obi-tee --agent KEY --tool-use-id TID --stream NAME [--socket-dir DIR]
+oby-tee --agent KEY --tool-use-id TID --stream NAME [--socket-dir DIR]
 ```
 
 Reads stdin → connects to `$OBS_SOCKET_DIR/$KEY.sock` → writes a tiny framing header (`tool_use_id`, `stream`, `started_at`) → forwards stdin bytes → closes on EOF.
@@ -178,9 +178,9 @@ Reads stdin → connects to `$OBS_SOCKET_DIR/$KEY.sock` → writes a tiny framin
 - Listener disconnects mid-stream → drain remaining stdin, exit 0.
 - Any internal error → brief log to stderr (which is itself probably tee'd back to the user!), exit 0.
 
-The agent's command can never see a non-zero exit from `obi-tee`.
+The agent's command can never see a non-zero exit from `oby-tee`.
 
-### 5.4 `obi-core` — the trait + types
+### 5.4 `oby-core` — the trait + types
 
 The Rust library every capturer is written against. Contains:
 
@@ -235,10 +235,10 @@ Verified both via docs and binary string corroboration (`updatedInput`×198, `ho
 
 ### 7.1 Env-gate
 
-The hook is installed *globally* in `~/.claude/settings.json` but gated by an env var only `obi-wrapper` sets:
+The hook is installed *globally* in `~/.claude/settings.json` but gated by an env var only `oby` sets:
 
 ```
-obi-wrapper:
+oby:
   export OBS_ACTIVE=1
   export OBS_SOCKET_DIR=$XDG_RUNTIME_DIR/obi/<session-id>     # macOS fallback: /tmp/obi/<session-id>
   exec claude "$@"
@@ -250,11 +250,11 @@ When you run plain `claude` (no wrapper), `OBS_ACTIVE` is unset; the hook exits 
 
 Every observer-side path is fail-open. Concretely:
 
-- `obi-hook` exits 0 on every error.
-- `obi-tee` exits 0 on every error and drains its stdin to EOF.
-- Listener gone, stale socket, race during wrapper startup → `obi-tee` silently consumes bytes.
+- `oby-hook` exits 0 on every error.
+- `oby-tee` exits 0 on every error and drains its stdin to EOF.
+- Listener gone, stale socket, race during wrapper startup → `oby-tee` silently consumes bytes.
 
-**Why this is load-bearing.** The canonical rewrite pattern uses `tee | obi-tee` inside the agent's pipeline. Under `set -o pipefail` (which we verified zsh supports), a non-zero exit anywhere in the pipeline propagates to the agent. If `obi-tee` ever exited non-zero, "observability" would convert into "this agent's command now errors when the observer is unhappy." That can never happen.
+**Why this is load-bearing.** The canonical rewrite pattern uses `tee | oby-tee` inside the agent's pipeline. Under `set -o pipefail` (which we verified zsh supports), a non-zero exit anywhere in the pipeline propagates to the agent. If `oby-tee` ever exited non-zero, "observability" would convert into "this agent's command now errors when the observer is unhappy." That can never happen.
 
 ---
 
@@ -304,7 +304,7 @@ Three deliberate calls:
 
 - **`tool_input` / `tool_response` stay raw `serde_json::Value`.** Capturers locally derive small typed structs (`#[derive(Deserialize)] struct BashInput { command: String, … }`) for the fields they care about. Keeps the trait object-safe and CC-version-tolerant.
 - **`pre_rewrite` is optional and defaults to passthrough.** Only the Bash capturer overrides it. Every other capturer is a pure observer.
-- **`RewriteDecision::Rewrite(Value)` hides CC's exact hook-output JSON.** Marshaling to `hookSpecificOutput.updatedInput` lives in `obi-hook`, not the capturer. Shields capturers from CC's schema drift.
+- **`RewriteDecision::Rewrite(Value)` hides CC's exact hook-output JSON.** Marshaling to `hookSpecificOutput.updatedInput` lives in `oby-hook`, not the capturer. Shields capturers from CC's schema drift.
 
 ### 9.2 Display entry types
 
@@ -322,7 +322,7 @@ pub struct DisplayEntry {
 pub enum EntryBody {
     None,
     Text(String),
-    LiveStream { tool_use_id: String },   // bound by id when obi-tee connects
+    LiveStream { tool_use_id: String },   // bound by id when oby-tee connects
     Diff(DiffBlock),                       // for Edit / Write
 }
 
@@ -389,7 +389,7 @@ Bash supports these too (identical syntax). **Fish and POSIX `sh` do not.** The 
 
 ### 10.2 Rewrite shapes
 
-Below, `T="obi-tee --agent $KEY --tool-use-id $TID --stream"`. All process subs end with `>/dev/null` to silence obi-tee's own (empty) stdout.
+Below, `T="oby-tee --agent $KEY --tool-use-id $TID --stream"`. All process subs end with `>/dev/null` to silence oby-tee's own (empty) stdout.
 
 **Outer wrap (always applied):**
 
@@ -397,7 +397,7 @@ Below, `T="obi-tee --agent $KEY --tool-use-id $TID --stream"`. All process subs 
 { <inner> ; } > >(tee >($T stdout >/dev/null)) 2> >(tee >($T stderr >/dev/null) >&2)
 ```
 
-Duplicates the *final* stdout and stderr to obi-tee while preserving the agent's FDs 1/2 byte-identically (the inner `tee` writes to its own stdout, which inherits from the parent shell — landing on the original FD).
+Duplicates the *final* stdout and stderr to oby-tee while preserving the agent's FDs 1/2 byte-identically (the inner `tee` writes to its own stdout, which inherits from the parent shell — landing on the original FD).
 
 **Inner pattern rewrites (when matched):**
 
@@ -421,7 +421,7 @@ For every pattern above, the agent-visible exit code is unchanged:
 - `cmd | grep PAT` → `cmd | tee >($T) | grep PAT`: exit is grep's (last stage).
 - The outer wrap's group `{ … ; }` returns the inner exit; process subs run alongside.
 
-Under `set -o pipefail`, a failing stage would propagate. **`obi-tee`'s fail-open guarantee (always exit 0) is what makes the tee-injections pipefail-safe.**
+Under `set -o pipefail`, a failing stage would propagate. **`oby-tee`'s fail-open guarantee (always exit 0) is what makes the tee-injections pipefail-safe.**
 
 ### 10.4 Scanner
 
@@ -452,20 +452,20 @@ for f in **/*.ts; do sed -i 's/x/y/g' "$f"; done
 
 Sed produces zero output per iteration, so there are no bytes to recover; yet the human reading the activity feed wants to see *which files got touched* — the loop iterations, the per-file command, the actual work being done.
 
-bash's `set -x` (xtrace) prints each executed command, after expansion, to a designated FD. `BASH_XTRACEFD` lets us route that trace stream to `obi-tee` *without polluting the agent's stderr* — preserving byte-identical agent view of stdout/stderr.
+bash's `set -x` (xtrace) prints each executed command, after expansion, to a designated FD. `BASH_XTRACEFD` lets us route that trace stream to `oby-tee` *without polluting the agent's stderr* — preserving byte-identical agent view of stdout/stderr.
 
 **Rewrite shape (bash):**
 
 ```
 bash -c '
-  exec 9> >(obi-tee --agent KEY --tool-use-id TID --stream xtrace >/dev/null)
+  exec 9> >(oby-tee --agent KEY --tool-use-id TID --stream xtrace >/dev/null)
   BASH_XTRACEFD=9
   set -x
   <agent_command>
 '
 ```
 
-The bash subshell isolates xtrace; `BASH_XTRACEFD=9` scopes trace output to FD 9 (not stderr); the process substitution streams it to obi-tee. The agent's command runs identically; CC's `tool_response` is unchanged.
+The bash subshell isolates xtrace; `BASH_XTRACEFD=9` scopes trace output to FD 9 (not stderr); the process substitution streams it to oby-tee. The agent's command runs identically; CC's `tool_response` is unchanged.
 
 **Per-shell behavior:**
 
@@ -491,9 +491,9 @@ This is the mechanism that handles the "agent writes a one-shot script that does
 ### 11.1 Why sockets
 
 - Live (no polling).
-- Non-blocking from the agent's perspective (the wrapper drains; `obi-tee` is fail-open so backpressure can't reach the agent's command).
+- Non-blocking from the agent's perspective (the wrapper drains; `oby-tee` is fail-open so backpressure can't reach the agent's command).
 - Path-addressed: the socket *path* is the stable per-agent handle that survives the many fresh shells a session spawns.
-- Many-writer-one-reader: each command spawns a new `obi-tee` that opens its own connection; the wrapper accepts many concurrent connections.
+- Many-writer-one-reader: each command spawns a new `oby-tee` that opens its own connection; the wrapper accepts many concurrent connections.
 
 ### 11.2 Layout
 
@@ -503,21 +503,21 @@ $OBS_SOCKET_DIR/                    # e.g. $XDG_RUNTIME_DIR/obi/<session-id>/
     <agent_id_1>.sock               # one per subagent that has run a tool
     <agent_id_2>.sock
     ...
-    control.sock                    # obi-hook → wrapper control channel (entries, updates)
+    control.sock                    # oby-hook → wrapper control channel (entries, updates)
 ```
 
-Socket directory created by `obi-wrapper` on launch and removed on exit (best-effort).
+Socket directory created by `oby` on launch and removed on exit (best-effort).
 
 ### 11.3 Framing
 
-Per `obi-tee` connection, a small JSON header line followed by raw bytes:
+Per `oby-tee` connection, a small JSON header line followed by raw bytes:
 
 ```
 {"v":1,"tool_use_id":"toolu_…","stream":"stderr-discarded","started_at":"2026-05-27T22:30:00Z"}
 <raw bytes until EOF>
 ```
 
-Control-channel messages (`obi-hook` → wrapper) are JSON-line framed:
+Control-channel messages (`oby-hook` → wrapper) are JSON-line framed:
 
 ```
 {"v":1,"kind":"entry","agent_key":"main","tool_use_id":"…","tool":"bash","headline":"…","body":{"type":"live_stream","tool_use_id":"…"},"status":"pending","timestamp":"…"}
@@ -551,7 +551,7 @@ TBD during implementation. Candidates: `Ctrl-G` (rarely used, no conflict with C
 
 ## 13. Configuration
 
-`~/.config/obi-tee/config.toml`:
+`~/.config/oby/config.toml`:
 
 ```toml
 [wrapper]
@@ -606,7 +606,7 @@ These don't affect the architecture; they're decided during implementation:
 Each of these is a real product capability that some users will want. They are deferred to keep PoC scope sane, and the architecture is intentionally compatible with them.
 
 - **Web UI.** Adds a localhost viewer that subscribes to the same socket stream. Requires splitting the daemon (§16.1).
-- **Cross-session persistence.** History survives `obi-wrapper` exit; browse past sessions. Requires the split daemon plus on-disk history with rotation.
+- **Cross-session persistence.** History survives `oby` exit; browse past sessions. Requires the split daemon plus on-disk history with rotation.
 - **External plugins.** User-installable capturers without rebuilding. Requires a stable plugin ABI (out-of-process is the realistic path).
 - **Windows support.** Different pty + unix-socket semantics.
 
@@ -615,14 +615,14 @@ Each of these is a real product capability that some users will want. They are d
 If/when cross-session persistence or a web UI is added, the wrapper-daemon collapse splits. What stays identical:
 
 - `Capturer` trait, all built-in capturers.
-- `obi-hook` and its rewrite logic.
-- `obi-tee`'s args, fail-open invariants, socket framing.
+- `oby-hook` and its rewrite logic.
+- `oby-tee`'s args, fail-open invariants, socket framing.
 - Socket path conventions (with daemon-managed session namespacing).
 
 What gets added:
 
-- A separate `obi-daemon` process that listens on the sockets, owns the ring buffers, and persists history to disk with rotation.
-- `obi-wrapper` becomes a thin client that subscribes to the daemon (over the same socket protocol).
+- A separate `oby-daemon` process that listens on the sockets, owns the ring buffers, and persists history to disk with rotation.
+- `oby` becomes a thin client that subscribes to the daemon (over the same socket protocol).
 - A session index for browsing past sessions.
 
 No PoC code is thrown away in the split. The wrapper's listener code moves into the daemon; the wrapper gains a subscriber.
