@@ -118,7 +118,7 @@ async fn run_async(rest: Vec<String>, socket_dir: PathBuf) -> Result<()> {
             let metrics_snapshot = *metrics.lock().unwrap();
             render(
                 &mut term,
-                &feed,
+                &mut feed,
                 &buffers.lock().unwrap(),
                 &metrics_snapshot,
             )?;
@@ -127,9 +127,7 @@ async fn run_async(rest: Vec<String>, socket_dir: PathBuf) -> Result<()> {
         if event::poll(Duration::from_millis(33))? {
             match event::read()? {
                 Event::Mouse(me) if current == ViewState::Feed => match me.kind {
-                    MouseEventKind::ScrollUp => {
-                        feed.scroll_up(&buffers.lock().unwrap(), 3);
-                    }
+                    MouseEventKind::ScrollUp => feed.scroll_up(3),
                     MouseEventKind::ScrollDown => feed.scroll_down(3),
                     _ => {}
                 },
@@ -194,11 +192,11 @@ async fn run_async(rest: Vec<String>, socket_dir: PathBuf) -> Result<()> {
                     InputDecision::NavigateFeed(nav) => match nav {
                         FeedNav::AgentPrev => feed.cycle_agent(&buffers.lock().unwrap(), -1),
                         FeedNav::AgentNext => feed.cycle_agent(&buffers.lock().unwrap(), 1),
-                        FeedNav::ScrollUp => feed.scroll_up(&buffers.lock().unwrap(), 1),
+                        FeedNav::ScrollUp => feed.scroll_up(1),
                         FeedNav::ScrollDown => feed.scroll_down(1),
-                        FeedNav::PageUp => feed.scroll_up(&buffers.lock().unwrap(), 10),
+                        FeedNav::PageUp => feed.scroll_up(10),
                         FeedNav::PageDown => feed.scroll_down(10),
-                        FeedNav::JumpTop => feed.scroll_to_top(&buffers.lock().unwrap()),
+                        FeedNav::JumpTop => feed.scroll_to_top(),
                         FeedNav::JumpBottom => feed.scroll_to_bottom(),
                         FeedNav::Quit => break,
                     },

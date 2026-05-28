@@ -6,17 +6,18 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, Paragraph},
     Terminal,
 };
 
 pub struct FeedView {
     pub selected_agent: String,
     pub agent_index: usize,
-    /// How many entries up from the bottom (tail) the user has scrolled.
-    /// 0 == auto-tail (latest entry visible). >0 == paused at an older
-    /// position; new entries still arrive but the visible window stays
-    /// anchored relative to the bottom of the ring.
+    /// Lines from the bottom of the rendered content.
+    /// 0 = auto-tail (latest visible). >0 = paused that many lines above the
+    /// tail; new entries continue to arrive but the visible window stays
+    /// anchored relative to the bottom. Clamped to a sensible max at render
+    /// time once we know the total line count and viewport height.
     pub scroll_offset: usize,
 }
 
@@ -43,24 +44,21 @@ impl FeedView {
         self.scroll_offset = 0;
     }
 
-    fn ring_len(&self, buffers: &AllAgentBuffers) -> usize {
-        buffers
-            .get(&self.selected_agent)
-            .map(|r| r.entries.len())
-            .unwrap_or(0)
-    }
-
-    pub fn scroll_up(&mut self, buffers: &AllAgentBuffers, by: usize) {
-        let max = self.ring_len(buffers).saturating_sub(1);
-        self.scroll_offset = (self.scroll_offset + by).min(max);
+    /// Scroll up by `by` lines. No upper clamp here; the render path clamps
+    /// to whatever max makes sense given the current total line count and
+    /// viewport height.
+    pub fn scroll_up(&mut self, by: usize) {
+        self.scroll_offset = self.scroll_offset.saturating_add(by);
     }
 
     pub fn scroll_down(&mut self, by: usize) {
         self.scroll_offset = self.scroll_offset.saturating_sub(by);
     }
 
-    pub fn scroll_to_top(&mut self, buffers: &AllAgentBuffers) {
-        self.scroll_offset = self.ring_len(buffers).saturating_sub(1);
+    /// Jump to the oldest line. We don't know the exact max here, so set to
+    /// a very large value and let the render path clamp.
+    pub fn scroll_to_top(&mut self) {
+        self.scroll_offset = usize::MAX / 2;
     }
 
     pub fn scroll_to_bottom(&mut self) {
@@ -70,7 +68,7 @@ impl FeedView {
 
 pub fn render<B: Backend>(
     term: &mut Terminal<B>,
-    view: &FeedView,
+    view: &mut FeedView,
     buffers: &AllAgentBuffers,
     metrics: &Metrics,
 ) -> anyhow::Result<()> {
@@ -88,11 +86,32 @@ pub fn render<B: Backend>(
 
         f.render_widget(metrics_bar(metrics, buffers), chunks[0]);
         f.render_widget(header(view), chunks[1]);
+
         let ring = buffers.get(&view.selected_agent);
-        let (list, mut state) = entries_block(ring, view.scroll_offset);
-        // Stateful render: ratatui scrolls the viewport so the selected entry
-        // is visible. We pick the selection based on scroll_offset (0 = tail).
-        f.render_stateful_widget(list, chunks[2], &mut state);
+        let entries_area = chunks[2];
+        // Inner height = block area minus the top + bottom border lines.
+        let inner_height = entries_area.height.saturating_sub(2);
+        let lines = build_lines(ring);
+        let total = lines.len() as u16;
+        let max_scroll = total.saturating_sub(inner_height);
+        // Clamp the user's requested offset to what actually makes sense.
+        let effective_offset = (view.scroll_offset as u16).min(max_scroll);
+        // Re-anchor the FeedView to the clamped value so the next keypress is
+        // operating on a real number, not the saturated "jump to top" sentinel.
+        view.scroll_offset = effective_offset as usize;
+        // Paragraph::scroll wants lines-from-top; we store lines-from-bottom.
+        let scroll_y = max_scroll - effective_offset;
+
+        let title = if effective_offset > 0 {
+            format!("activity  [scrolled +{effective_offset} lines · End/G to tail]")
+        } else {
+            "activity".into()
+        };
+        let p = Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title(title))
+            .scroll((scroll_y, 0));
+        f.render_widget(p, entries_area);
+
         f.render_widget(agent_picker(buffers, &view.selected_agent), chunks[3]);
     })?;
     Ok(())
@@ -127,28 +146,20 @@ fn metrics_bar(m: &Metrics, buffers: &AllAgentBuffers) -> Paragraph<'static> {
     Paragraph::new(line).style(Style::default().fg(Color::DarkGray))
 }
 
-fn entries_block(ring: Option<&AgentRing>, scroll_offset: usize) -> (List<'static>, ListState) {
-    let items: Vec<ListItem> = match ring {
-        None => vec![ListItem::new("no entries yet")],
-        Some(r) => r.entries.iter().map(format_entry).collect(),
-    };
-    let mut state = ListState::default();
-    if !items.is_empty() {
-        let last = items.len() - 1;
-        let selected = last.saturating_sub(scroll_offset);
-        state.select(Some(selected));
+fn build_lines(ring: Option<&AgentRing>) -> Vec<Line<'static>> {
+    match ring {
+        None => vec![Line::from("no entries yet")],
+        Some(r) => {
+            let mut out = Vec::with_capacity(r.entries.len() * 3);
+            for rec in &r.entries {
+                append_entry_lines(rec, &mut out);
+            }
+            out
+        }
     }
-    let title = if scroll_offset > 0 {
-        format!("activity  [scrolled +{scroll_offset} · End/G to tail]")
-    } else {
-        "activity".into()
-    };
-    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));
-    (list, state)
 }
 
-fn format_entry(rec: &EntryRecord) -> ListItem<'static> {
-    let mut lines: Vec<Line> = Vec::new();
+fn append_entry_lines(rec: &EntryRecord, lines: &mut Vec<Line<'static>>) {
     let status_glyph = match rec.entry.status {
         EntryStatus::Pending => "▸",
         EntryStatus::Ok => "✓",
@@ -178,7 +189,6 @@ fn format_entry(rec: &EntryRecord) -> ListItem<'static> {
             ]));
         }
     }
-    ListItem::new(lines)
 }
 
 fn status_color(s: EntryStatus) -> Color {
@@ -249,29 +259,29 @@ mod tests {
     }
 
     #[test]
-    fn scroll_clamps_at_top_and_bottom() {
-        let mut b = AllAgentBuffers::default();
-        for i in 0..5 {
-            b.push_entry(entry("main", &format!("t{i}")));
-        }
+    fn scroll_down_clamps_at_zero() {
         let mut v = FeedView::default();
-        // At tail by default.
         assert_eq!(v.scroll_offset, 0);
-        // Scrolling down at tail is a no-op.
+        v.scroll_down(50);
+        assert_eq!(v.scroll_offset, 0);
+        v.scroll_up(7);
+        assert_eq!(v.scroll_offset, 7);
         v.scroll_down(3);
-        assert_eq!(v.scroll_offset, 0);
-        // Scroll up by 100 — clamps to len-1 = 4.
-        v.scroll_up(&b, 100);
         assert_eq!(v.scroll_offset, 4);
-        // Now scroll_down by 2.
-        v.scroll_down(2);
-        assert_eq!(v.scroll_offset, 2);
-        // Jump to bottom.
+        v.scroll_down(100);
+        assert_eq!(v.scroll_offset, 0);
+    }
+
+    #[test]
+    fn scroll_to_top_uses_sentinel_clamped_at_render() {
+        // scroll_to_top doesn't know the max line count, so it uses a large
+        // sentinel; the render path clamps it to the actual max. We just
+        // assert here that it's set to something very large.
+        let mut v = FeedView::default();
+        v.scroll_to_top();
+        assert!(v.scroll_offset > 1_000_000);
         v.scroll_to_bottom();
         assert_eq!(v.scroll_offset, 0);
-        // Jump to top.
-        v.scroll_to_top(&b);
-        assert_eq!(v.scroll_offset, 4);
     }
 
     #[test]
@@ -285,10 +295,9 @@ mod tests {
             selected_agent: "main".into(),
             ..FeedView::default()
         };
-        v.scroll_up(&b, 2);
-        assert_eq!(v.scroll_offset, 2);
+        v.scroll_up(20);
+        assert_eq!(v.scroll_offset, 20);
         v.cycle_agent(&b, 1);
-        // Switching agent should snap back to tail on the new agent.
         assert_eq!(v.scroll_offset, 0);
     }
 }
