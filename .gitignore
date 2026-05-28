@@ -1,0 +1,15 @@
+# Rust build artifacts
+/target
+debug/
+
+# rustfmt backups
+**/*.rs.bk
+
+# MSVC debug info
+*.pdb
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
