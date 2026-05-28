@@ -13,3 +13,4 @@ debug/
 .idea/
 .vscode/
 *.swp
+homebrew-tap/
