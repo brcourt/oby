@@ -12,12 +12,16 @@ pub fn rewrite(command: &str, agent_key: &str, tool_use_id: &str) -> Option<Stri
     let inner = inject_redirect_tees(&with_filters, agent_key, tool_use_id);
     let stdout_sink = obi_tee_invocation(agent_key, tool_use_id, "stdout");
     let stderr_sink = obi_tee_invocation(agent_key, tool_use_id, "stderr");
+    let xtrace_sink = obi_tee_invocation(agent_key, tool_use_id, "xtrace");
     // Newline (not `;`) before the closing `}` so that a trailing
     // `# comment` in the inner command is terminated. With `;`, an
     // unterminated `#`-to-EOL comment swallowed the closing brace and
     // produced a zsh/bash parse error.
     Some(format!(
-        "{{ {inner}\n}} > >(tee >({stdout_sink} >/dev/null)) 2> >(tee >({stderr_sink} >/dev/null) >&2)"
+        "{{ BASH_XTRACEFD=9\nset -x\n{inner}\n}} \
+         > >(tee >({stdout_sink} >/dev/null)) \
+         2> >(tee >({stderr_sink} >/dev/null) >&2) \
+         9> >({xtrace_sink} >/dev/null)"
     ))
 }
 
@@ -191,11 +195,16 @@ mod tests {
     fn outer_wrap_form() {
         // We rely on the test env running bash/zsh — should hold on the dev machine.
         let out = rewrite("ls -la", "main", "t1").expect("bash/zsh expected in test env");
-        assert!(out.starts_with("{ ls -la\n} > >(tee >(oby-tee"));
+        // Wrap now leads with BASH_XTRACEFD=9 then set -x then the inner cmd.
+        assert!(
+            out.starts_with("{ BASH_XTRACEFD=9\nset -x\nls -la\n} "),
+            "outer wrap header changed; got: {out}"
+        );
         assert!(out.contains("--agent 'main'"));
         assert!(out.contains("--tool-use-id 't1'"));
         assert!(out.contains("--stream 'stdout'"));
         assert!(out.contains("--stream 'stderr'"));
+        assert!(out.contains("--stream 'xtrace'"));
     }
 
     #[test]
@@ -360,5 +369,31 @@ mod tests {
             !out.contains("--stream 'stdout-to-file'"),
             "process substitution target must not be wrapped"
         );
+    }
+
+    #[test]
+    fn rewrite_outer_wrap_includes_xtrace_fd() {
+        let out = rewrite("echo hi", "main", "t1").unwrap();
+        // Three things must be in the wrapped command:
+        // 1. set -x to enable command tracing.
+        assert!(out.contains("set -x"), "set -x missing; got: {out}");
+        // 2. BASH_XTRACEFD=9 to route trace to FD 9.
+        assert!(
+            out.contains("BASH_XTRACEFD=9"),
+            "BASH_XTRACEFD=9 missing; got: {out}"
+        );
+        // 3. A 9> >(oby-tee --stream 'xtrace' ...) redirect on the block.
+        assert!(
+            out.contains("9> >(oby-tee --agent 'main' --tool-use-id 't1' --stream 'xtrace'"),
+            "FD 9 → xtrace sink missing; got: {out}"
+        );
+    }
+
+    #[test]
+    fn rewrite_outer_wrap_preserves_stdout_and_stderr_sinks() {
+        // Adding xtrace must not break the v0.1 stdout/stderr capture.
+        let out = rewrite("echo hi", "main", "t1").unwrap();
+        assert!(out.contains("--stream 'stdout'"));
+        assert!(out.contains("--stream 'stderr'"));
     }
 }
