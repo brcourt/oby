@@ -17,3 +17,6 @@ tracing-subscriber = { workspace = true }
 [[bin]]
 name = "oby-tee"
 path = "src/main.rs"
+
+[dev-dependencies]
+tempfile = { workspace = true }
