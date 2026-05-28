@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 #[derive(Parser)]
@@ -25,6 +26,24 @@ enum Cmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         rest: Vec<String>,
     },
+    /// Test utilities: inject synthetic hook traffic into a running oby session.
+    Probe {
+        #[command(subcommand)]
+        action: ProbeCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum ProbeCmd {
+    /// Print the socket dir of the most recent running oby session.
+    Latest,
+    /// Inject the v0.1 smoke scenario (entries + chunks + updates) into a
+    /// running oby. Validates the wrapper end-to-end without needing claude.
+    Smoke {
+        /// Override the socket dir. Defaults to the latest running session.
+        #[arg(long)]
+        socket_dir: Option<PathBuf>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -32,6 +51,10 @@ fn main() -> ExitCode {
     match cli.command {
         Some(Cmd::Install) => install::run(),
         Some(Cmd::Claude { rest }) => run::run(rest),
+        Some(Cmd::Probe { action }) => match action {
+            ProbeCmd::Latest => probe::run_latest(),
+            ProbeCmd::Smoke { socket_dir } => probe::run_smoke(socket_dir),
+        },
         None => {
             // `oby <args...>` with no explicit subcommand — treat as `oby claude <args>`.
             run::run(cli.rest)
@@ -41,6 +64,7 @@ fn main() -> ExitCode {
 
 mod install;
 mod key;
+mod probe;
 mod pty;
 mod ring;
 mod run;
