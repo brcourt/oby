@@ -7,6 +7,34 @@ use tokio::net::{UnixListener, UnixStream};
 
 use crate::ring::AllAgentBuffers;
 
+/// Append a JSON line to `$OBS_WRAPPER_LOG` if that env var is set. Mirrors
+/// oby-hook's OBS_HOOK_LOG. Best-effort; never panics, never blocks the
+/// wrapper. Off by default (zero overhead).
+fn debug_log(event: &str, detail: &str) {
+    use std::io::Write;
+    let Some(path) = std::env::var_os("OBS_WRAPPER_LOG") else {
+        return;
+    };
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    let line = serde_json::json!({
+        "ts": ts,
+        "pid": std::process::id(),
+        "event": event,
+        "detail": detail,
+    })
+    .to_string();
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = writeln!(f, "{line}");
+    }
+}
+
 /// Spawn listener tasks on the given socket dir.
 pub async fn spawn_listeners(
     socket_dir: PathBuf,
@@ -20,12 +48,24 @@ pub async fn spawn_listeners(
     let buffers_for_ctrl = buffers.clone();
     let socket_dir_clone = socket_dir.clone();
     tokio::spawn(async move {
-        while let Ok((conn, _)) = listener.accept().await {
-            let buffers = buffers_for_ctrl.clone();
-            let dir = socket_dir_clone.clone();
-            tokio::spawn(async move {
-                let _ = handle_control(conn, buffers, dir).await;
-            });
+        // Never exit this task on a transient accept() error (EMFILE under
+        // bursts of parallel hook invocations is the realistic case). If we
+        // exited, every subsequent hook would fail to connect and the feed
+        // would silently stop updating.
+        loop {
+            match listener.accept().await {
+                Ok((conn, _)) => {
+                    let buffers = buffers_for_ctrl.clone();
+                    let dir = socket_dir_clone.clone();
+                    tokio::spawn(async move {
+                        let _ = handle_control(conn, buffers, dir).await;
+                    });
+                }
+                Err(_) => {
+                    debug_log("accept_err", "control");
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            }
         }
     });
 
@@ -55,20 +95,28 @@ async fn handle_control(
             continue;
         }
         let Ok(msg) = serde_json::from_str::<ControlMessage>(line_trim) else {
+            debug_log("ctrl_parse_failed", line_trim);
             continue;
         };
         match msg {
             ControlMessage::Entry { entry, .. } => {
                 let agent_key = entry.agent_key.clone();
+                let tuid = entry.tool_use_id.clone();
                 {
                     let mut lock = buffers.lock().unwrap();
                     lock.push_entry(entry);
                 }
+                debug_log("entry", &format!("{agent_key}/{tuid}"));
                 ensure_agent_listener(&socket_dir, &agent_key, buffers.clone()).await;
             }
             ControlMessage::Update { update, .. } => {
-                let mut lock = buffers.lock().unwrap();
-                lock.apply_update(update);
+                let tuid = update.tool_use_id.clone();
+                let status = format!("{:?}", update.status);
+                {
+                    let mut lock = buffers.lock().unwrap();
+                    lock.apply_update(update);
+                }
+                debug_log("update", &format!("{tuid} {status}"));
             }
         }
     }
@@ -90,14 +138,19 @@ async fn ensure_agent_listener(
     let agent_key = agent_key.to_string();
     tokio::spawn(async move {
         loop {
-            let Ok((conn, _)) = listener.accept().await else {
-                return;
-            };
-            let buffers = buffers.clone();
-            let agent_key = agent_key.clone();
-            tokio::spawn(async move {
-                let _ = handle_agent_connection(conn, &agent_key, buffers).await;
-            });
+            match listener.accept().await {
+                Ok((conn, _)) => {
+                    let buffers = buffers.clone();
+                    let agent_key = agent_key.clone();
+                    tokio::spawn(async move {
+                        let _ = handle_agent_connection(conn, &agent_key, buffers).await;
+                    });
+                }
+                Err(_) => {
+                    debug_log("accept_err", &format!("agent:{agent_key}"));
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            }
         }
     });
 }
@@ -114,14 +167,25 @@ async fn handle_agent_connection(
         return Ok(());
     }
     let Ok(header) = serde_json::from_str::<HeaderLine>(header_line.trim()) else {
+        debug_log("agent_header_parse_failed", header_line.trim());
         return Ok(());
     };
+    debug_log(
+        "agent_open",
+        &format!("{agent_key}/{}/{}", header.tool_use_id, header.stream),
+    );
     let mut buf = vec![0u8; 8 * 1024];
+    let mut total = 0usize;
     loop {
         let n = reader.read(&mut buf).await?;
         if n == 0 {
+            debug_log(
+                "agent_close",
+                &format!("{agent_key}/{} {total}B", header.tool_use_id),
+            );
             break;
         }
+        total += n;
         let mut lock = buffers.lock().unwrap();
         lock.append_live(
             agent_key,
