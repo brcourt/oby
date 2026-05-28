@@ -1,13 +1,11 @@
 //! Detect which shell CC's Bash tool will execute the command in.
 
-#[allow(dead_code)]
 pub enum Shell {
     Bash,
     Zsh,
     Other,
 }
 
-#[allow(dead_code)]
 pub fn detect() -> Shell {
     if std::env::var("BASH_VERSION").is_ok() {
         return Shell::Bash;
@@ -23,7 +21,6 @@ pub fn detect() -> Shell {
 }
 
 impl Shell {
-    #[allow(dead_code)]
     pub fn supports_process_substitution(&self) -> bool {
         matches!(self, Shell::Bash | Shell::Zsh)
     }
@@ -31,7 +28,6 @@ impl Shell {
     /// Build the per-shell xtrace wrap blueprint. The caller passes the
     /// already-formatted oby-tee sink invocations so they stay in lockstep
     /// with the stdout sink built by `rewrite()`.
-    #[allow(dead_code)]
     pub fn xtrace_wrap(&self, stderr_sink: &str, xtrace_sink: &str) -> XtraceWrap {
         match self {
             Shell::Bash => XtraceWrap {
@@ -81,7 +77,6 @@ set -x
 ///
 /// Each shell produces a different shape. The caller does NOT need to know
 /// which shell is in play — it just stitches the three pieces together.
-#[allow(dead_code)]
 pub struct XtraceWrap {
     /// Inserted at the top of the brace block, before the inner command.
     /// Empty string if no xtrace is desired.

@@ -1,27 +1,43 @@
 use super::scanner::code_spans;
-use super::shell::detect;
+use super::shell::{detect, Shell};
 
 /// Build the rewritten command for a given agent_key + tool_use_id.
 /// Returns None if the shell doesn't support the constructs we need (safe fallback: passthrough).
 pub fn rewrite(command: &str, agent_key: &str, tool_use_id: &str) -> Option<String> {
-    if !detect().supports_process_substitution() {
+    let shell = detect();
+    if !shell.supports_process_substitution() {
         return None;
     }
+    rewrite_with_shell(command, agent_key, tool_use_id, shell)
+}
+
+pub(crate) fn rewrite_with_shell(
+    command: &str,
+    agent_key: &str,
+    tool_use_id: &str,
+    shell: Shell,
+) -> Option<String> {
+    // No proc-sub gate here — production already gated; tests can force any
+    // shell variant to verify the wrap shape regardless of the running shell.
     let neutralized = neutralize_dev_null_stderr(command, agent_key, tool_use_id);
     let with_filters = inject_pre_filter_tees(&neutralized, agent_key, tool_use_id);
     let inner = inject_redirect_tees(&with_filters, agent_key, tool_use_id);
     let stdout_sink = obi_tee_invocation(agent_key, tool_use_id, "stdout");
     let stderr_sink = obi_tee_invocation(agent_key, tool_use_id, "stderr");
     let xtrace_sink = obi_tee_invocation(agent_key, tool_use_id, "xtrace");
+    let wrap = shell.xtrace_wrap(&stderr_sink, &xtrace_sink);
     // Newline (not `;`) before the closing `}` so that a trailing
     // `# comment` in the inner command is terminated. With `;`, an
     // unterminated `#`-to-EOL comment swallowed the closing brace and
     // produced a zsh/bash parse error.
     Some(format!(
-        "{{ BASH_XTRACEFD=9\nset -x\n{inner}\n}} \
+        "{{ {prefix}{inner}\n}} \
          > >(tee >({stdout_sink} >/dev/null)) \
-         2> >(tee >({stderr_sink} >/dev/null) >&2) \
-         9> >({xtrace_sink} >/dev/null)"
+         {stderr_redirect} \
+         {xtrace_fds}",
+        prefix = wrap.prefix,
+        stderr_redirect = wrap.stderr_redirect,
+        xtrace_fds = wrap.xtrace_fds,
     ))
 }
 
@@ -169,6 +185,7 @@ fn shell_escape(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::shell::Shell;
     use super::*;
 
     #[test]
@@ -193,8 +210,7 @@ mod tests {
 
     #[test]
     fn outer_wrap_form() {
-        // We rely on the test env running bash/zsh — should hold on the dev machine.
-        let out = rewrite("ls -la", "main", "t1").expect("bash/zsh expected in test env");
+        let out = rewrite_with_shell("ls -la", "main", "t1", Shell::Bash).unwrap();
         // Wrap now leads with BASH_XTRACEFD=9 then set -x then the inner cmd.
         assert!(
             out.starts_with("{ BASH_XTRACEFD=9\nset -x\nls -la\n} "),
@@ -209,7 +225,7 @@ mod tests {
 
     #[test]
     fn rewrite_includes_dev_null_neutralization() {
-        let out = rewrite("cmd 2>/dev/null", "main", "t1").unwrap();
+        let out = rewrite_with_shell("cmd 2>/dev/null", "main", "t1", Shell::Bash).unwrap();
         assert!(out.contains("--stream stderr-discarded"));
     }
 
@@ -220,7 +236,13 @@ mod tests {
     /// terminates the comment.
     #[test]
     fn trailing_comment_does_not_break_outer_wrap() {
-        let out = rewrite("echo ok # 2>/dev/null trailing comment", "main", "t1").unwrap();
+        let out = rewrite_with_shell(
+            "echo ok # 2>/dev/null trailing comment",
+            "main",
+            "t1",
+            Shell::Bash,
+        )
+        .unwrap();
         // The closing brace must be on its own line (post-comment), not on the
         // same line as the comment.
         assert!(
@@ -237,7 +259,7 @@ mod tests {
 
     #[test]
     fn rewrite_grep_injects_pre_grep_tee() {
-        let out = rewrite("ls | grep foo", "main", "t1").unwrap();
+        let out = rewrite_with_shell("ls | grep foo", "main", "t1", Shell::Bash).unwrap();
         assert!(
             out.contains(
                 "tee >(oby-tee --agent 'main' --tool-use-id 't1' --stream 'stdout-pre-grep'"
@@ -253,7 +275,8 @@ mod tests {
 
     #[test]
     fn rewrite_head_injects_pre_head_tee() {
-        let out = rewrite("cat /etc/passwd | head -n 5", "main", "t1").unwrap();
+        let out =
+            rewrite_with_shell("cat /etc/passwd | head -n 5", "main", "t1", Shell::Bash).unwrap();
         assert!(
             out.contains("--stream 'stdout-pre-head'"),
             "expected stdout-pre-head tee; got: {out}"
@@ -263,7 +286,8 @@ mod tests {
 
     #[test]
     fn rewrite_tail_injects_pre_tail_tee() {
-        let out = rewrite("cat /etc/passwd | tail -n 3", "main", "t1").unwrap();
+        let out =
+            rewrite_with_shell("cat /etc/passwd | tail -n 3", "main", "t1", Shell::Bash).unwrap();
         assert!(out.contains("--stream 'stdout-pre-tail'"));
         assert!(out.contains("| tail -n 3"));
     }
@@ -272,7 +296,7 @@ mod tests {
     fn rewrite_first_pipe_stage_not_tee_d() {
         // The first segment is the producer; no preceding pipe to tee onto.
         // We only ever tee BEFORE a filter, not before the producer.
-        let out = rewrite("grep foo /etc/passwd", "main", "t1").unwrap();
+        let out = rewrite_with_shell("grep foo /etc/passwd", "main", "t1", Shell::Bash).unwrap();
         assert!(
             !out.contains("--stream 'stdout-pre-grep'"),
             "a bare `grep` (not piped) must not get a pre-grep tee; got: {out}"
@@ -281,7 +305,7 @@ mod tests {
 
     #[test]
     fn rewrite_grep_inside_quoted_string_not_rewritten() {
-        let out = rewrite(r#"echo "ls | grep foo""#, "main", "t1").unwrap();
+        let out = rewrite_with_shell(r#"echo "ls | grep foo""#, "main", "t1", Shell::Bash).unwrap();
         assert!(
             !out.contains("--stream 'stdout-pre-grep'"),
             "the quoted `| grep` is text, not a real pipe; got: {out}"
@@ -290,13 +314,13 @@ mod tests {
 
     #[test]
     fn rewrite_grep_in_comment_not_rewritten() {
-        let out = rewrite("echo ok # | grep foo", "main", "t1").unwrap();
+        let out = rewrite_with_shell("echo ok # | grep foo", "main", "t1", Shell::Bash).unwrap();
         assert!(!out.contains("--stream 'stdout-pre-grep'"));
     }
 
     #[test]
     fn rewrite_grep_inside_subshell_not_rewritten() {
-        let out = rewrite("(cat foo | grep bar)", "main", "t1").unwrap();
+        let out = rewrite_with_shell("(cat foo | grep bar)", "main", "t1", Shell::Bash).unwrap();
         assert!(
             !out.contains("--stream 'stdout-pre-grep'"),
             "the pipe inside (...) belongs to the subshell, not the outer pipeline"
@@ -305,7 +329,7 @@ mod tests {
 
     #[test]
     fn rewrite_out_redirect_injects_tee_to_file() {
-        let out = rewrite("echo hi > out.txt", "main", "t1").unwrap();
+        let out = rewrite_with_shell("echo hi > out.txt", "main", "t1", Shell::Bash).unwrap();
         assert!(
             out.contains("> >(tee out.txt >(oby-tee --agent 'main' --tool-use-id 't1' --stream 'stdout-to-file'"),
             "expected tee + oby-tee wrap around > out.txt; got: {out}"
@@ -321,7 +345,7 @@ mod tests {
 
     #[test]
     fn rewrite_append_redirect_injects_tee_a_to_file() {
-        let out = rewrite("echo more >> log.txt", "main", "t1").unwrap();
+        let out = rewrite_with_shell("echo more >> log.txt", "main", "t1", Shell::Bash).unwrap();
         assert!(
             out.contains("> >(tee -a log.txt >(oby-tee --agent 'main' --tool-use-id 't1' --stream 'stdout-appended-file'"),
             "expected tee -a + stdout-appended-file; got: {out}"
@@ -330,7 +354,8 @@ mod tests {
 
     #[test]
     fn rewrite_quoted_target_preserved() {
-        let out = rewrite(r#"echo hi > "out file.txt""#, "main", "t1").unwrap();
+        let out =
+            rewrite_with_shell(r#"echo hi > "out file.txt""#, "main", "t1", Shell::Bash).unwrap();
         assert!(
             out.contains(r#"tee "out file.txt""#),
             "quoted target must be preserved verbatim; got: {out}"
@@ -342,7 +367,7 @@ mod tests {
         // `2> err` is FD-prefixed; v0.1's neutralize_dev_null_stderr handles
         // 2>/dev/null specifically. A non-/dev/null FD redirect is left
         // unchanged by both layers.
-        let out = rewrite("echo hi 2> err.txt", "main", "t1").unwrap();
+        let out = rewrite_with_shell("echo hi 2> err.txt", "main", "t1", Shell::Bash).unwrap();
         assert!(
             !out.contains("--stream 'stdout-to-file'"),
             "2> err.txt is not a v0.2 redirect; got: {out}"
@@ -356,7 +381,8 @@ mod tests {
     fn rewrite_dev_null_stderr_and_file_redirect_coexist() {
         // v0.1's 2>/dev/null layer fires for the 2>/dev/null, v0.2's redirect
         // layer fires for the > out.txt. Both end up in the final command.
-        let out = rewrite("cmd > out.txt 2>/dev/null", "main", "t1").unwrap();
+        let out =
+            rewrite_with_shell("cmd > out.txt 2>/dev/null", "main", "t1", Shell::Bash).unwrap();
         assert!(out.contains("--stream stderr-discarded"));
         assert!(out.contains("--stream 'stdout-to-file'"));
     }
@@ -364,7 +390,7 @@ mod tests {
     #[test]
     fn rewrite_process_substitution_target_not_re_rewritten() {
         // > >(...) is process substitution — scanner skips it.
-        let out = rewrite("cmd > >(some-cmd)", "main", "t1").unwrap();
+        let out = rewrite_with_shell("cmd > >(some-cmd)", "main", "t1", Shell::Bash).unwrap();
         assert!(
             !out.contains("--stream 'stdout-to-file'"),
             "process substitution target must not be wrapped"
@@ -373,7 +399,7 @@ mod tests {
 
     #[test]
     fn rewrite_outer_wrap_includes_xtrace_fd() {
-        let out = rewrite("echo hi", "main", "t1").unwrap();
+        let out = rewrite_with_shell("echo hi", "main", "t1", Shell::Bash).unwrap();
         // Three things must be in the wrapped command:
         // 1. set -x to enable command tracing.
         assert!(out.contains("set -x"), "set -x missing; got: {out}");
@@ -392,7 +418,7 @@ mod tests {
     #[test]
     fn rewrite_outer_wrap_preserves_stdout_and_stderr_sinks() {
         // Adding xtrace must not break the v0.1 stdout/stderr capture.
-        let out = rewrite("echo hi", "main", "t1").unwrap();
+        let out = rewrite_with_shell("echo hi", "main", "t1", Shell::Bash).unwrap();
         assert!(out.contains("--stream 'stdout'"));
         assert!(out.contains("--stream 'stderr'"));
     }
@@ -400,7 +426,7 @@ mod tests {
     #[test]
     fn rewrite_ampersand_combined_redirect_not_touched() {
         // `&>` is deferred to v0.3+; the rewriter must leave it alone.
-        let out = rewrite("echo hi &> log.txt", "main", "t1").unwrap();
+        let out = rewrite_with_shell("echo hi &> log.txt", "main", "t1", Shell::Bash).unwrap();
         assert!(
             out.contains("echo hi &> log.txt"),
             "&> must pass through; got: {out}"
@@ -415,7 +441,7 @@ mod tests {
     fn rewrite_fd_duplication_not_touched() {
         // `>&2` is fd duplication; rewriting it would orphan `&2` in the
         // output and crash the shell. The rewriter must leave it alone.
-        let out = rewrite("echo error >&2", "main", "t1").unwrap();
+        let out = rewrite_with_shell("echo error >&2", "main", "t1", Shell::Bash).unwrap();
         assert!(
             out.contains("echo error >&2"),
             ">&2 must pass through; got: {out}"
@@ -424,5 +450,50 @@ mod tests {
             !out.contains("--stream 'stdout-to-file'"),
             ">&2 must not be wrapped; got: {out}"
         );
+    }
+
+    #[test]
+    fn zsh_outer_wrap_includes_ps4_sentinel_and_awk_demuxer() {
+        let out = rewrite_with_shell("echo hi", "main", "t1", Shell::Zsh).unwrap();
+        assert!(
+            out.contains(r"PS4=$'\x01"),
+            "PS4 sentinel missing; got: {out}"
+        );
+        assert!(out.contains("set -x"), "set -x missing; got: {out}");
+        assert!(out.contains("awk"), "awk demuxer missing; got: {out}");
+        assert!(
+            out.contains("9> >("),
+            "FD 9 xtrace sink missing; got: {out}"
+        );
+        assert!(
+            out.contains("8> >("),
+            "FD 8 stderr capture missing; got: {out}"
+        );
+        assert!(
+            out.contains("7>&2"),
+            "FD 7 stderr passthrough missing; got: {out}"
+        );
+    }
+
+    #[test]
+    fn zsh_wrap_does_not_use_bash_xtracefd() {
+        let out = rewrite_with_shell("echo hi", "main", "t1", Shell::Zsh).unwrap();
+        assert!(
+            !out.contains("BASH_XTRACEFD"),
+            "BASH_XTRACEFD must not appear in zsh wrap; got: {out}"
+        );
+    }
+
+    #[test]
+    fn other_shell_skips_xtrace() {
+        let out = rewrite_with_shell("echo hi", "main", "t1", Shell::Other).unwrap();
+        assert!(!out.contains("set -x"));
+        assert!(!out.contains("BASH_XTRACEFD"));
+        assert!(!out.contains("PS4="));
+        // No FD 9 redirect either.
+        assert!(!out.contains("9> >("));
+        // But stdout/stderr capture still works (v0.1 baseline).
+        assert!(out.contains("--stream 'stdout'"));
+        assert!(out.contains("--stream 'stderr'"));
     }
 }
