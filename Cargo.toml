@@ -1,0 +1,31 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/oby-core",
+    "crates/oby-tee",
+    "crates/oby-hook",
+    "crates/oby",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/brcourt/oby"
+authors = ["Brandon Courtney"]
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }
+nix = { version = "0.27", features = ["signal"] }
+crossterm = "0.27"
+ratatui = "0.26"
+portable-pty = "0.8"
+tempfile = "3"
+xdg = "2"

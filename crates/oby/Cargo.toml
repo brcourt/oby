@@ -1,0 +1,27 @@
+[package]
+name = "oby-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Live, per-agent activity feed for Claude Code"
+readme = "../../README.md"
+
+[dependencies]
+oby-core = { path = "../oby-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+nix = { workspace = true }
+crossterm = { workspace = true }
+ratatui = { workspace = true }
+portable-pty = { workspace = true }
+xdg = { workspace = true }
+
+[[bin]]
+name = "oby"
+path = "src/main.rs"
