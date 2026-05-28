@@ -42,6 +42,7 @@ fn main() -> ExitCode {
 mod install;
 mod ring;
 mod run;
+mod sockets;
 
 #[cfg(test)]
 mod tests {

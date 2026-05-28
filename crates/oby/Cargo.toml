@@ -22,6 +22,9 @@ ratatui = { workspace = true }
 portable-pty = { workspace = true }
 xdg = { workspace = true }
 
+[dev-dependencies]
+tempfile = { workspace = true }
+
 [[bin]]
 name = "oby"
 path = "src/main.rs"
