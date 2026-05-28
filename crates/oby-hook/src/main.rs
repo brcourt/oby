@@ -48,6 +48,16 @@ async fn run() -> Result<()> {
         }
     };
 
+    let socket_dir = std::env::var_os("OBS_SOCKET_DIR").map(PathBuf::from);
+
+    // Session-level events (no capturer involved). Handle and exit early.
+    if matches!(payload.ctx.hook_event_name, HookEvent::SubagentStop) {
+        let agent_key = payload.ctx.agent_key().to_string();
+        debug_log("subagent_stop", &agent_key, "", "");
+        send_to_wrapper(&socket_dir, ControlMessage::agent_destroyed(agent_key)).await;
+        return Ok(());
+    }
+
     let caps = registry::builtin_capturers();
     let Some(cap) = caps.iter().find(|c| c.tool_name() == payload.ctx.tool_name) else {
         debug_log(
@@ -58,8 +68,6 @@ async fn run() -> Result<()> {
         );
         return Ok(());
     };
-
-    let socket_dir = std::env::var_os("OBS_SOCKET_DIR").map(PathBuf::from);
 
     match payload.ctx.hook_event_name {
         HookEvent::Pre => {
@@ -161,6 +169,7 @@ async fn run() -> Result<()> {
                 );
             }
         }
+        HookEvent::SubagentStop => unreachable!("handled above"),
         HookEvent::PostFailure => {
             // CC routes tool errors to PostToolUseFailure rather than PostToolUse.
             // Route through the capturer's normal post-render path so we still get

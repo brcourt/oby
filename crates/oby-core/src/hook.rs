@@ -41,6 +41,12 @@ pub enum HookEvent {
     /// would stay pending on any failed Read/Bash/etc.
     #[serde(rename = "PostToolUseFailure")]
     PostFailure,
+    /// Fires when a subagent is torn down (its Task call returned). The
+    /// payload includes the agent_id of the destroyed subagent; the wrapper
+    /// uses it to mark the corresponding ring as destroyed (status dot
+    /// flips from green to red).
+    #[serde(rename = "SubagentStop")]
+    SubagentStop,
 }
 
 #[derive(Debug, Clone, Deserialize)]

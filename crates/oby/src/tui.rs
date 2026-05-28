@@ -119,7 +119,7 @@ pub fn render<B: Backend>(
 
 fn header(view: &FeedView) -> Paragraph<'static> {
     let title = format!(
-        " oby — agent: {}   (Ctrl-G claude · ←/→ agent · ↑/↓ scroll · PgUp/PgDn · g/G or Home/End · q quit)",
+        " oby — agent: {}   (Ctrl-G claude · ←/→ agent · ↑/↓ scroll · PgUp/PgDn · g/G · d delete · q quit)",
         view.selected_agent
     );
     Paragraph::new(title).style(Style::default().add_modifier(Modifier::REVERSED))
@@ -209,6 +209,8 @@ fn agent_picker(buffers: &AllAgentBuffers, selected: &str) -> Paragraph<'static>
         if i > 0 {
             spans.push(Span::raw("   "));
         }
+        spans.push(status_dot(r));
+        spans.push(Span::raw(" "));
         let label = r
             .agent_type
             .as_deref()
@@ -222,6 +224,18 @@ fn agent_picker(buffers: &AllAgentBuffers, selected: &str) -> Paragraph<'static>
         spans.push(Span::styled(label, style));
     }
     Paragraph::new(Line::from(spans)).block(Block::default().borders(Borders::TOP).title("agents"))
+}
+
+/// Green for alive (or main, always), red for destroyed. Driven by the
+/// `destroyed` flag the wrapper sets when CC's SubagentStop hook fires for
+/// the agent. Main is never marked destroyed — it's the session itself.
+fn status_dot(ring: &AgentRing) -> Span<'static> {
+    let color = if ring.destroyed {
+        Color::Red
+    } else {
+        Color::Green
+    };
+    Span::styled("●", Style::default().fg(color))
 }
 
 #[cfg(test)]

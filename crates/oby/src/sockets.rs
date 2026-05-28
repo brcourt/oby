@@ -134,6 +134,10 @@ async fn handle_control(
                 }
                 debug_log("update", &format!("{tuid} {status}"));
             }
+            ControlMessage::AgentDestroyed { agent_key, .. } => {
+                buffers.lock().unwrap().mark_destroyed(&agent_key);
+                debug_log("agent_destroyed", &agent_key);
+            }
         }
     }
     Ok(())

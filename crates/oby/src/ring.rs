@@ -20,6 +20,11 @@ pub struct AgentRing {
     pub agent_type: Option<String>,
     pub entries: VecDeque<EntryRecord>,
     pub capacity: usize,
+    /// True once we've received a `SubagentStop` hook for this agent_id.
+    /// The TUI's status dot uses this to show alive (green) vs destroyed
+    /// (red). Main agent is never marked destroyed (it has no
+    /// SubagentStop — it's the session itself).
+    pub destroyed: bool,
 }
 
 /// An entry + any live bytes attached to its LiveStream.
@@ -46,6 +51,7 @@ impl AllAgentBuffers {
             agent_type: None,
             entries: VecDeque::with_capacity(DEFAULT_CAPACITY),
             capacity: DEFAULT_CAPACITY,
+            destroyed: false,
         });
         if ring.entries.len() >= ring.capacity {
             ring.entries.pop_front();
@@ -66,12 +72,12 @@ impl AllAgentBuffers {
     /// in the metrics bar.
     pub fn apply_update(&mut self, upd: DisplayEntryUpdate) -> bool {
         for ring in self.inner.values_mut() {
-            if let Some(rec) = ring
+            let idx = ring
                 .entries
-                .iter_mut()
-                .rfind(|r| r.entry.tool_use_id == upd.tool_use_id)
-            {
-                merge_update_into(rec, upd);
+                .iter()
+                .rposition(|r| r.entry.tool_use_id == upd.tool_use_id);
+            if let Some(idx) = idx {
+                merge_update_into(&mut ring.entries[idx], upd);
                 return false;
             }
         }
@@ -100,6 +106,27 @@ impl AllAgentBuffers {
                 bytes,
             });
         }
+    }
+
+    /// Mark an agent as destroyed (its `SubagentStop` hook fired). The TUI
+    /// flips its status dot from green to red. Idempotent; no-op if the ring
+    /// doesn't exist yet (oby-hook can race the wrapper here too — we just
+    /// drop the signal in that rare case).
+    pub fn mark_destroyed(&mut self, agent_key: &str) {
+        if let Some(ring) = self.inner.get_mut(agent_key) {
+            ring.destroyed = true;
+        }
+    }
+
+    /// Remove an agent's ring from the buffers. Returns true if something was
+    /// removed. Used by the TUI's `d` keybind to clean up the agent picker.
+    /// Refuses to remove "main" — that ring is the session and re-creating it
+    /// implicitly on the next event would be surprising.
+    pub fn remove_agent(&mut self, agent_key: &str) -> bool {
+        if agent_key == "main" {
+            return false;
+        }
+        self.inner.remove(agent_key).is_some()
     }
 
     /// Iterate agents in a stable order: "main" first, then the rest alphabetically.

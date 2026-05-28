@@ -9,6 +9,9 @@ pub enum ControlMessage {
     Entry { v: u8, entry: DisplayEntry },
     /// Update to an existing entry (correlated by tool_use_id).
     Update { v: u8, update: DisplayEntryUpdate },
+    /// A subagent has finished (its `SubagentStop` hook fired). The wrapper
+    /// flips that ring's `destroyed` flag so the status dot turns red.
+    AgentDestroyed { v: u8, agent_key: String },
 }
 
 impl ControlMessage {
@@ -17,6 +20,12 @@ impl ControlMessage {
     }
     pub fn update(update: DisplayEntryUpdate) -> Self {
         Self::Update { v: 1, update }
+    }
+    pub fn agent_destroyed(agent_key: impl Into<String>) -> Self {
+        Self::AgentDestroyed {
+            v: 1,
+            agent_key: agent_key.into(),
+        }
     }
 }
 

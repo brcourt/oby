@@ -34,6 +34,8 @@ pub enum FeedNav {
     PageDown,
     JumpTop,
     JumpBottom,
+    /// Remove the currently selected agent from the buffers (main refuses).
+    DeleteAgent,
     Quit,
 }
 
@@ -63,6 +65,9 @@ pub fn decide(ev: KeyEvent, state: ViewState) -> InputDecision {
             KeyCode::Char('G') => InputDecision::NavigateFeed(FeedNav::JumpBottom),
             KeyCode::Left => InputDecision::NavigateFeed(FeedNav::AgentPrev),
             KeyCode::Right => InputDecision::NavigateFeed(FeedNav::AgentNext),
+            KeyCode::Char('d') | KeyCode::Char('x') => {
+                InputDecision::NavigateFeed(FeedNav::DeleteAgent)
+            }
             KeyCode::Char('q') => InputDecision::NavigateFeed(FeedNav::Quit),
             _ => InputDecision::Forward(Vec::new()),
         },

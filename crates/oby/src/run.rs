@@ -198,6 +198,19 @@ async fn run_async(rest: Vec<String>, socket_dir: PathBuf) -> Result<()> {
                         FeedNav::PageDown => feed.scroll_down(10),
                         FeedNav::JumpTop => feed.scroll_to_top(),
                         FeedNav::JumpBottom => feed.scroll_to_bottom(),
+                        FeedNav::DeleteAgent => {
+                            let to_remove = feed.selected_agent.clone();
+                            let removed = {
+                                let mut b = buffers.lock().unwrap();
+                                b.remove_agent(&to_remove)
+                            };
+                            if removed {
+                                // Snap selection back to main and reset scroll.
+                                feed.selected_agent = "main".into();
+                                feed.agent_index = 0;
+                                feed.scroll_offset = 0;
+                            }
+                        }
                         FeedNav::Quit => break,
                     },
                 },

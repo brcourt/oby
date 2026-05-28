@@ -64,6 +64,28 @@ fn install() -> Result<()> {
         }
     }
 
+    // SubagentStop has a different matcher dimension (agent type, not tool
+    // name). We want to catch all subagent types, so we install with `.*` as
+    // the matcher — CC's docs example uses alternation like "Edit|Write" so
+    // regex syntax is supported. The wildcard matches built-in agents
+    // (general-purpose, Explore, Plan) and any custom subagent types.
+    {
+        let arr = hooks_obj.entry("SubagentStop").or_insert_with(|| json!([]));
+        let arr = arr.as_array_mut().context("hook event must be an array")?;
+        let already = arr.iter().any(|e| {
+            e.get("hooks").and_then(|h| h.as_array()).is_some_and(|hs| {
+                hs.iter()
+                    .any(|h| h.get("command").and_then(|c| c.as_str()) == Some(cmd.as_str()))
+            })
+        });
+        if !already {
+            arr.push(json!({
+                "matcher": ".*",
+                "hooks": [{ "type": "command", "command": cmd }]
+            }));
+        }
+    }
+
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).context("creating ~/.claude")?;
     }
