@@ -11,6 +11,7 @@ A wrapper (`alias claude="obi-tee claude"`) owns your terminal; a hotkey toggles
 ## How it works (briefly)
 
 - A `PreToolUse` hook rewrites Bash commands to tee the bytes that would have been discarded into a per-agent unix socket — the agent's tool result stays byte-identical.
+- Multi-statement scripts get **execution tracing** (`set -x` via `BASH_XTRACEFD`) so you see *which* commands ran, not just their output — useful when an agent writes a one-shot loop that touches many files without echoing anything.
 - The harness-injected `agent_id` field routes each subagent's commands to its own stream. Main agent and concurrent subagents stay cleanly separated.
 - The wrapper owns the terminal: claude in one view, the activity feed in the other, one hotkey to swap.
 - A small plugin trait (`Capturer`) lets each observed tool — Bash, Read, Edit, Grep, Task, … — declare its own renderer in one file in the source tree. Adding a new capturer is one PR + one line in the registry.

@@ -33,6 +33,8 @@ Three derived rules that anchor every design choice:
 ### Goals (PoC)
 
 - Live activity feed of every tool call an agent makes — Bash with full output, plus Read / Edit / Write / Grep / Glob / Task / WebFetch as structured timeline entries.
+- Recover **bytes the agent discards inside its shell pipelines** (`2>/dev/null`, `| grep`, `| head`) by rewriting the command to tee the would-be-discarded streams into a per-agent socket. The agent's tool result stays byte-identical.
+- Visibility into **what multi-statement scripts actually do**, not just their output — execution tracing (xtrace) captures each command a script runs, including iterations of `for`/`while` loops where individual commands produce no output (§10.6).
 - Per-agent streams. Main agent and each subagent get their own activity log, routed by `agent_id`. Concurrent subagents stay separate.
 - Single-window UX. A wrapper (`alias claude="obi-tee claude"`) owns the terminal; a hotkey toggles between the agent's claude TUI and the activity feed.
 - Plugin-based capturers. Each tool's observation logic is one module in the source tree. Adding a new capturer is one PR + one line in the registry.
@@ -433,11 +435,54 @@ Not a full shell parser. A shell-aware tokenizer that classifies spans as: word,
 | `exec 2>/dev/null; …`                | Outer wrap only                                                  |
 | Heredocs (`<<EOF`)                   | Detect boundary, skip body, rewrite the command line normally    |
 | Subshell `(…)` and group `{ …; }`    | Recurse into the inner content                                   |
+| `for` / `while` / `until` / `if` / `case` blocks | Recurse into each statement in the body              |
 | `$(…)` / backticks                   | Don't recurse; outer wrap captures their output                  |
 | Compound chains (`&&`, `\|\|`, `;`)  | Recurse into each component                                      |
 | Anything ambiguous                   | Outer wrap only                                                  |
 
 The unifying rule: **when in doubt, outer wrap only — never break the command.**
+
+### 10.6 Execution tracing via xtrace
+
+Discard-recovery captures *bytes the agent's command emitted*. A different observability gap appears when an agent writes a multi-statement script whose intermediate commands emit nothing — e.g.:
+
+```bash
+for f in **/*.ts; do sed -i 's/x/y/g' "$f"; done
+```
+
+Sed produces zero output per iteration, so there are no bytes to recover; yet the human reading the activity feed wants to see *which files got touched* — the loop iterations, the per-file command, the actual work being done.
+
+bash's `set -x` (xtrace) prints each executed command, after expansion, to a designated FD. `BASH_XTRACEFD` lets us route that trace stream to `obi-tee` *without polluting the agent's stderr* — preserving byte-identical agent view of stdout/stderr.
+
+**Rewrite shape (bash):**
+
+```
+bash -c '
+  exec 9> >(obi-tee --agent KEY --tool-use-id TID --stream xtrace >/dev/null)
+  BASH_XTRACEFD=9
+  set -x
+  <agent_command>
+'
+```
+
+The bash subshell isolates xtrace; `BASH_XTRACEFD=9` scopes trace output to FD 9 (not stderr); the process substitution streams it to obi-tee. The agent's command runs identically; CC's `tool_response` is unchanged.
+
+**Per-shell behavior:**
+
+- **bash login shell:** clean — `BASH_XTRACEFD` separates trace from stderr. Strong candidate for default-on.
+- **zsh login shell:** zsh's `XTRACE` writes to stderr with no clean FD redirect. PoC behavior: **off by default**; opting in wraps the command in `bash -c` (documented caveat: bash-vs-zsh syntax differences in the agent's command are rare but possible).
+- **Other shells:** off.
+
+**Config:**
+
+```toml
+[capture.bash]
+xtrace = "auto"   # "on" | "off" | "auto" (on iff bash login shell detected)
+```
+
+**Activity-feed presentation:** xtrace lines render as a distinct sub-stream of the entry (labeled `xtrace`), interleaved with stdout / stderr by timestamp. Same `tool_use_id` ties everything together.
+
+This is the mechanism that handles the "agent writes a one-shot script that does a lot of things" case — combined with discard-recovery, it covers both *bytes the agent threw away* and *commands whose work doesn't produce bytes*.
 
 ---
 
