@@ -222,17 +222,34 @@ fn debug_log(event: &str, detail: &str, tool: &str, tool_use_id: &str) {
 }
 
 async fn send_to_wrapper(socket_dir: &Option<PathBuf>, msg: ControlMessage) {
-    let Some(dir) = socket_dir else { return };
-    let path = dir.join("control.sock");
-    let Ok(mut sock) = UnixStream::connect(&path).await else {
+    let Some(dir) = socket_dir else {
+        debug_log("send_skip", "no socket_dir env", "", "");
         return;
+    };
+    let path = dir.join("control.sock");
+    let mut sock = match UnixStream::connect(&path).await {
+        Ok(s) => s,
+        Err(e) => {
+            debug_log("send_connect_err", &e.to_string(), "", "");
+            return;
+        }
     };
     let line = match serde_json::to_string(&msg) {
         Ok(s) => s,
-        Err(_) => return,
+        Err(e) => {
+            debug_log("send_serialize_err", &e.to_string(), "", "");
+            return;
+        }
     };
-    let _ = sock.write_all(line.as_bytes()).await;
-    let _ = sock.write_all(b"\n").await;
+    if let Err(e) = sock.write_all(line.as_bytes()).await {
+        debug_log("send_write_err", &e.to_string(), "", "");
+        return;
+    }
+    if let Err(e) = sock.write_all(b"\n").await {
+        debug_log("send_write_nl_err", &e.to_string(), "", "");
+        return;
+    }
+    debug_log("send_ok", &format!("{}B", line.len()), "", "");
 }
 
 fn emit_hook_decision(new_input: &Value) -> Result<()> {
