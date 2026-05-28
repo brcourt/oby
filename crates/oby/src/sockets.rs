@@ -29,6 +29,11 @@ pub async fn spawn_listeners(
         }
     });
 
+    // Pre-create the agent socket for "main" so oby-tee never has to race the
+    // wrapper's processing of the first PreToolUse Entry. Subagent sockets are
+    // still created lazily in handle_control when their first Entry arrives.
+    ensure_agent_listener(&socket_dir, "main", buffers).await;
+
     Ok(())
 }
 

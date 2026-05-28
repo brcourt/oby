@@ -38,10 +38,12 @@ async fn run(args: Args) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("no socket dir (set OBS_SOCKET_DIR)"))?;
     let socket_path = socket_dir.join(format!("{}.sock", args.agent));
 
-    // Connect — failure is fail-open: drain stdin to EOF, exit 0.
-    let mut sock = match UnixStream::connect(&socket_path).await {
-        Ok(s) => s,
-        Err(_) => {
+    // Connect, retrying briefly to handle the race where the wrapper hasn't
+    // yet bound the agent socket (subagents: socket is created lazily when
+    // their first PreToolUse Entry is processed). Total budget ~150ms.
+    let mut sock = match connect_with_retry(&socket_path).await {
+        Some(s) => s,
+        None => {
             drain_stdin().await;
             return Ok(());
         }
@@ -70,6 +72,17 @@ async fn run(args: Args) -> Result<()> {
         }
     }
     Ok(())
+}
+
+async fn connect_with_retry(path: &std::path::Path) -> Option<UnixStream> {
+    // 10 attempts × 15ms = 150ms max. Most connects succeed on the first try.
+    for _ in 0..10 {
+        if let Ok(s) = UnixStream::connect(path).await {
+            return Some(s);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+    }
+    None
 }
 
 async fn drain_stdin() {
