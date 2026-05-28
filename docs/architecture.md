@@ -130,18 +130,26 @@ The wrapper is the listener — no external daemon. This is the **collapsed** to
 
 ### 5.2 `obi-hook` — the binary CC invokes
 
-Tiny binary configured in `~/.claude/settings.json`:
+Tiny binary configured in `~/.claude/settings.json`, with one entry per observed tool:
 
 ```json
 {
   "hooks": {
-    "PreToolUse":  [{ "matcher": "*", "hooks": [{ "type": "command", "command": "obi-hook" }] }],
-    "PostToolUse": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "obi-hook" }] }]
+    "PreToolUse": [
+      { "matcher": "Bash", "hooks": [{ "type": "command", "command": "obi-hook" }] },
+      { "matcher": "Read", "hooks": [{ "type": "command", "command": "obi-hook" }] },
+      { "matcher": "Edit", "hooks": [{ "type": "command", "command": "obi-hook" }] }
+    ],
+    "PostToolUse": [
+      { "matcher": "Bash", "hooks": [{ "type": "command", "command": "obi-hook" }] },
+      { "matcher": "Read", "hooks": [{ "type": "command", "command": "obi-hook" }] },
+      { "matcher": "Edit", "hooks": [{ "type": "command", "command": "obi-hook" }] }
+    ]
   }
 }
 ```
 
-Matcher `*` — one hook entry, dispatch by tool name internally to the appropriate capturer.
+One entry per observed tool (truncated above — full install adds Write, Grep, Glob, Task, WebFetch). `obi-hook` dispatches internally by `tool_name` to the matching capturer; the matchers just select what fires the hook. If CC's current version supports a wildcard matcher (e.g. `".*"` regex), the install can collapse to one entry per event — to be verified during implementation against the target CC version. Explicit per-tool matchers are empirically confirmed to work (RTK uses this form).
 
 On every invocation:
 
