@@ -22,6 +22,7 @@ ratatui = { workspace = true }
 portable-pty = { workspace = true }
 xdg = { workspace = true }
 uuid = { version = "1", features = ["v4"] }
+which = "6"
 
 [dev-dependencies]
 tempfile = { workspace = true }
