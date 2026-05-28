@@ -1,5 +1,6 @@
 /// A span of the input that is NOT inside a quoted string or after a comment.
 /// (start, end) are byte indices into the original string.
+#[allow(dead_code)]
 #[derive(Debug, PartialEq, Eq)]
 pub struct CodeSpan {
     pub start: usize,
@@ -9,6 +10,7 @@ pub struct CodeSpan {
 /// Walk a shell command and return spans of unquoted-and-non-commented code.
 /// Recognizes: '…' (no escapes), "…" (with \ escapes), # comment (to EOL).
 /// `$(…)` and backticks are treated as code (we recurse no further).
+#[allow(dead_code)]
 pub fn code_spans(s: &str) -> Vec<CodeSpan> {
     let bytes = s.as_bytes();
     let mut spans = Vec::new();
@@ -76,6 +78,7 @@ pub fn code_spans(s: &str) -> Vec<CodeSpan> {
 }
 
 /// Convenience: does any code span (unquoted region) contain the given substring?
+#[allow(dead_code)]
 pub fn code_contains(s: &str, needle: &str) -> bool {
     for span in code_spans(s) {
         if s[span.start..span.end].contains(needle) {
