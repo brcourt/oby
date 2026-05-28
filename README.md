@@ -36,7 +36,6 @@ If you already have a PreToolUse rewriter installed (e.g. [rtk](https://github.c
 
 ## Known limitations (v0.1)
 
-- **Read entries stay pending (`▸`) — never transition to `✓`.** Claude Code does not fire `PostToolUse` for the `Read` tool in version 2.1.x, despite the docs implying it should. We can't observe the read completing. The entry is still useful (it records the path), but the status indicator is stuck. Bash and any future tool that does fire PostToolUse work normally.
 - The Bash capturer only neutralizes `2>/dev/null`. Other inner patterns (`| grep`, `| head`, `> FILE`) ship in v0.2.
 - No xtrace / `set -x` — multi-statement scripts only surface outputs, not which command produced them.
 - Only Bash and Read capturers ship. Edit, Write, Grep, Glob, Task, WebFetch tool calls don't show entries in the feed.
