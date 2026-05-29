@@ -160,6 +160,12 @@ fn bash_xtrace_lands_in_xtrace_stream() {
         !stderr.contains("+ echo hello"),
         "bash trace must NOT appear in stderr; got: {stderr:?}"
     );
+    let stdout_log = dir.path().join("log/stdout.txt");
+    let stdout = fs::read_to_string(&stdout_log).expect("stdout log");
+    assert!(
+        stdout.contains("hello"),
+        "bash stdout must capture 'hello'; got: {stdout:?}"
+    );
 }
 
 #[test]
@@ -196,5 +202,11 @@ fn zsh_xtrace_lands_in_xtrace_stream() {
     assert!(
         !stderr.contains("echo hello"),
         "zsh trace must NOT appear in stderr; got: {stderr:?}"
+    );
+    let stdout_log = dir.path().join("log/stdout.txt");
+    let stdout = fs::read_to_string(&stdout_log).expect("stdout log");
+    assert!(
+        stdout.contains("hello"),
+        "zsh stdout must capture 'hello'; got: {stdout:?}"
     );
 }
