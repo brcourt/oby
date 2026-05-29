@@ -6,7 +6,7 @@ Fittingly, **oby** is what's left of *observability* after the middle bytes get 
 
 ## Status
 
-**v0.2.** Bash + Read capturers, complete discard-recovery (`2>/dev/null`, `| grep`, `| head`, `| tail`, `> FILE`, `>> FILE`), execution tracing (`set -x` via `BASH_XTRACEFD`), multi-agent routing, composes with other PreToolUse hooks, mouse + keyboard scrollback, top-style metrics bar. Empirically verified against Claude Code `2.1.x`. Implementation plan: [`docs/plans/v0.2.md`](docs/plans/v0.2.md). Architecture: [`docs/architecture.md`](docs/architecture.md).
+**v0.2.1.** Bash + Read capturers, complete discard-recovery (`2>/dev/null`, `| grep`, `| head`, `| tail`, `> FILE`, `>> FILE`), execution tracing under both bash (`BASH_XTRACEFD=9`) and zsh (PS4 sentinel + awk demuxer), multi-agent routing, composes with other PreToolUse hooks, mouse + keyboard scrollback, top-style metrics bar. Empirically verified against Claude Code `2.1.x`. Implementation plan: [`docs/plans/v0.2.1.md`](docs/plans/v0.2.1.md). Architecture: [`docs/architecture.md`](docs/architecture.md).
 
 ## How it works
 
