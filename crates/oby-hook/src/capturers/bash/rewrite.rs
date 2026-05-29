@@ -456,22 +456,19 @@ mod tests {
     fn zsh_outer_wrap_includes_ps4_sentinel_and_awk_demuxer() {
         let out = rewrite_with_shell("echo hi", "main", "t1", Shell::Zsh).unwrap();
         assert!(
-            out.contains(r"PS4=$'\x01"),
+            out.contains("PS4='__OBYXT__"),
             "PS4 sentinel missing; got: {out}"
         );
         assert!(out.contains("set -x"), "set -x missing; got: {out}");
         assert!(out.contains("awk"), "awk demuxer missing; got: {out}");
+        // The demuxer pipes to xtrace + stderr sinks via subshells.
         assert!(
-            out.contains("9> >("),
-            "FD 9 xtrace sink missing; got: {out}"
+            out.contains("--stream 'xtrace'"),
+            "xtrace sink missing; got: {out}"
         );
         assert!(
-            out.contains("8> >("),
-            "FD 8 stderr capture missing; got: {out}"
-        );
-        assert!(
-            out.contains("7>&2"),
-            "FD 7 stderr passthrough missing; got: {out}"
+            out.contains("--stream 'stderr'"),
+            "stderr sink missing; got: {out}"
         );
     }
 

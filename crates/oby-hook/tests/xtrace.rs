@@ -111,6 +111,20 @@ fn run_in_shell(shell: &str, path: &str, command: &str) {
     assert!(status.success(), "{shell} exit: {status:?}");
 }
 
+fn bash_supports_xtracefd() -> bool {
+    let output = Command::new("bash")
+        .arg("-c")
+        .arg("echo $BASH_VERSINFO")
+        .output();
+    match output {
+        Ok(out) if out.status.success() => {
+            let v = String::from_utf8_lossy(&out.stdout);
+            v.trim().parse::<u32>().is_ok_and(|major| major >= 4)
+        }
+        _ => false,
+    }
+}
+
 #[test]
 fn bash_xtrace_lands_in_xtrace_stream() {
     let Some(bash_path) = resolve_shell("bash") else {
@@ -124,6 +138,10 @@ fn bash_xtrace_lands_in_xtrace_stream() {
         .map_or(true, |s| !s.success())
     {
         eprintln!("bash not available; skipping");
+        return;
+    }
+    if !bash_supports_xtracefd() {
+        eprintln!("bash version < 4.1 (no BASH_XTRACEFD); skipping");
         return;
     }
     let (dir, path) = fake_oby_tee_env();

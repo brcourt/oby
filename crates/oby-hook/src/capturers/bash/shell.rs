@@ -36,26 +36,30 @@ impl Shell {
                 xtrace_fds: format!("9> >({xtrace_sink} >/dev/null)"),
             },
             Shell::Zsh => {
-                // PS4 sentinel: \x01 is a control byte unlikely to appear in
-                // user stderr. zsh expands %N (current source) and %i (line)
-                // so the trace stays zsh-native after the sentinel is stripped.
+                // Multi-char sentinel `__OBYXT__` prepended to zsh's native format.
+                // The sentinel is printable so it survives any shell pipeline
+                // intermediates; the demuxer strips it before forwarding to the
+                // xtrace sink, leaving the zsh-native `+(source):line> cmd` prefix.
                 //
-                // awk demuxer:
-                //   /^\x01/ → strip sentinel, write to FD 9 (xtrace)
-                //   else    → write to FD 8 (stderr capture) AND FD 7 (real stderr → agent)
+                // awk demuxer routes each line:
+                //   /^__OBYXT__/  → strip sentinel, pipe to xtrace_sink
+                //   else          → pipe to stderr_sink AND print to /dev/stderr
+                //                   (so claude still sees the agent's real stderr)
                 //
-                // Both /dev/fd/N writes are buffered; fflush after each.
-                let prefix = r#"PS4=$'\x01+(%N):%i> '
-set -x
-"#
-                .to_string();
-                let demuxer = r#"awk '/^\x01/ { sub(/^\x01/, ""); print > "/dev/fd/9"; fflush("/dev/fd/9"); next } { print > "/dev/fd/8"; fflush("/dev/fd/8"); print > "/dev/fd/7"; fflush("/dev/fd/7") }'"#;
+                // Sink commands are passed via -v so the awk script itself doesn't
+                // embed shell-quoted commands. Double-quote the -v values so the
+                // inner single quotes (from shell_escape) survive.
+                let prefix = "PS4='__OBYXT__+(%N):%i> '\nset -x\n".to_string();
+                let demuxer = format!(
+                    r#"awk -v xt="{xtrace_sink} >/dev/null" -v err="{stderr_sink} >/dev/null" '/^__OBYXT__/{{sub(/^__OBYXT__/, ""); print | xt; next}} {{print | err; print > "/dev/stderr"}}'"#,
+                );
                 XtraceWrap {
                     prefix,
                     stderr_redirect: format!("2> >({demuxer})"),
-                    xtrace_fds: format!(
-                        "7>&2 8> >({stderr_sink} >/dev/null) 9> >({xtrace_sink} >/dev/null)"
-                    ),
+                    // Block-level FDs no longer needed for zsh — awk pipes directly
+                    // to sink commands via subshells. The block keeps stdout/stderr
+                    // wrappers but drops the FD 7/8/9 dance.
+                    xtrace_fds: String::new(),
                 }
             }
             Shell::Other => XtraceWrap {
@@ -86,8 +90,9 @@ pub struct XtraceWrap {
     /// splits sentinel-prefixed lines to FD 9.
     pub stderr_redirect: String,
     /// Trailing FD redirects on the brace block. Under bash this is
-    /// `9> >(xtrace_sink)`; under zsh it's `7>&2 8> >(stderr_sink) 9> >(xtrace_sink)`.
-    /// Empty string under shells that don't get xtrace.
+    /// `9> >(xtrace_sink)`; under zsh this is empty because the awk demuxer
+    /// inside the `2> >(...)` process substitution pipes directly to sink
+    /// commands via subshells. Empty string under shells that don't get xtrace.
     pub xtrace_fds: String,
 }
 
@@ -125,23 +130,25 @@ mod tests {
     #[test]
     fn zsh_xtrace_wrap_uses_ps4_sentinel_and_awk_demuxer() {
         let w = Shell::Zsh.xtrace_wrap("STDERR_SINK", "XTRACE_SINK");
-        // PS4 prepends a control-byte sentinel so awk can split.
+        // PS4 prepends the multi-char sentinel so awk can split.
         assert!(
-            w.prefix.contains(r"PS4=$'\x01"),
-            "zsh prefix must set PS4 with \\x01 sentinel; got: {}",
+            w.prefix.contains("PS4='__OBYXT__"),
+            "zsh prefix must set PS4 with __OBYXT__ sentinel; got: {}",
             w.prefix
         );
         assert!(w.prefix.contains("set -x"));
-        // Stderr is the awk demuxer.
+        // Stderr redirect contains the awk demuxer.
         assert!(
             w.stderr_redirect.contains("awk"),
             "zsh stderr redirect must use awk demuxer; got: {}",
             w.stderr_redirect
         );
-        // Three block-level FDs: 7 (real stderr passthrough), 8 (stderr capture), 9 (xtrace).
-        assert!(w.xtrace_fds.contains("7>&2"));
-        assert!(w.xtrace_fds.contains("8> >("));
-        assert!(w.xtrace_fds.contains("9> >("));
+        // Demuxer pipes to both sinks via subshells (`print | xt` / `print | err`),
+        // and the sink commands appear as -v values.
+        assert!(w.stderr_redirect.contains("XTRACE_SINK"));
+        assert!(w.stderr_redirect.contains("STDERR_SINK"));
+        // No block-level xtrace FDs needed — awk handles all routing.
+        assert!(w.xtrace_fds.is_empty());
     }
 
     #[test]
