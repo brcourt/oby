@@ -59,6 +59,93 @@ pub fn grep_is_invert_match(args: &str) -> bool {
     false
 }
 
+/// Parsed user-args for head/tail, just enough to drive the windowing
+/// pipeline. Approximate parsing per spec — wrong parses fall through to
+/// default behavior rather than panicking.
+#[derive(Debug, PartialEq, Eq)]
+pub struct HeadTailArgs {
+    /// Line count the user requested (or the default of 10).
+    pub count: usize,
+    /// True when the user's invocation uses a mode we don't try to
+    /// window: head/tail `-c` (byte count), tail `-f`/`-F` (follow), or
+    /// tail `-n +N` (from-line-N form).
+    pub skip: bool,
+}
+
+const DEFAULT_HEAD_TAIL_COUNT: usize = 10;
+
+/// Parse user's head args. Returns count and skip flag.
+pub fn parse_head_args(args: &str) -> HeadTailArgs {
+    parse_common(args, /* check_follow = */ false)
+}
+
+/// Parse user's tail args. Returns count and skip flag. Tail-specific
+/// skip conditions: `-f`/`-F` follow and `-n +N` from-line-N form.
+pub fn parse_tail_args(args: &str) -> HeadTailArgs {
+    parse_common(args, /* check_follow = */ true)
+}
+
+fn parse_common(args: &str, check_follow: bool) -> HeadTailArgs {
+    let mut tokens = args.split_whitespace().peekable();
+    let mut count: Option<usize> = None;
+    while let Some(tok) = tokens.next() {
+        // Byte mode: skip regardless of shell variant.
+        if tok == "-c" || tok.starts_with("--bytes") || (tok.starts_with("-c") && tok.len() > 2) {
+            return HeadTailArgs {
+                count: DEFAULT_HEAD_TAIL_COUNT,
+                skip: true,
+            };
+        }
+        // Follow modes (tail only).
+        if check_follow && (tok == "-f" || tok == "-F" || tok == "--follow") {
+            return HeadTailArgs {
+                count: DEFAULT_HEAD_TAIL_COUNT,
+                skip: true,
+            };
+        }
+        // -n N or -n +N
+        if tok == "-n" {
+            if let Some(val) = tokens.next() {
+                if check_follow && val.starts_with('+') {
+                    // tail -n +N: from-line-N form. Skip.
+                    return HeadTailArgs {
+                        count: DEFAULT_HEAD_TAIL_COUNT,
+                        skip: true,
+                    };
+                }
+                if let Ok(n) = val.parse::<usize>() {
+                    count = Some(n);
+                }
+            }
+            continue;
+        }
+        // tail-only: bare +N is `tail +N` from-line-N short form.
+        if check_follow
+            && tok.starts_with('+')
+            && tok.len() > 1
+            && tok[1..].chars().all(|c| c.is_ascii_digit())
+        {
+            return HeadTailArgs {
+                count: DEFAULT_HEAD_TAIL_COUNT,
+                skip: true,
+            };
+        }
+        // -NUM short form (e.g., `head -5`).
+        if let Some(rest) = tok.strip_prefix('-') {
+            if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()) {
+                if let Ok(n) = rest.parse::<usize>() {
+                    count = Some(n);
+                    continue;
+                }
+            }
+        }
+    }
+    HeadTailArgs {
+        count: count.unwrap_or(DEFAULT_HEAD_TAIL_COUNT),
+        skip: false,
+    }
+}
+
 fn read_env(name: &str) -> usize {
     const DEFAULT: usize = 3;
     const MAX: usize = 1000;
@@ -216,5 +303,102 @@ mod tests {
         // --invert-match must be the exact long-form token; partial matches
         // inside other args don't trigger.
         assert!(!grep_is_invert_match("--invert-something foo"));
+    }
+
+    #[test]
+    fn head_no_args_uses_default_count() {
+        let p = parse_head_args("");
+        assert_eq!(p.count, 10);
+        assert!(!p.skip);
+    }
+
+    #[test]
+    fn head_n_flag_extracts_count() {
+        let p = parse_head_args("-n 5");
+        assert_eq!(p.count, 5);
+        assert!(!p.skip);
+    }
+
+    #[test]
+    fn head_short_form_count() {
+        // `head -5 file` is BSD/GNU short form for `head -n 5 file`.
+        let p = parse_head_args("-5");
+        assert_eq!(p.count, 5);
+        assert!(!p.skip);
+
+        let p = parse_head_args("-12 file.txt");
+        assert_eq!(p.count, 12);
+    }
+
+    #[test]
+    fn head_with_file_arg() {
+        // Non-numeric positional after count is the input file; ignored.
+        let p = parse_head_args("-n 7 /etc/passwd");
+        assert_eq!(p.count, 7);
+        assert!(!p.skip);
+    }
+
+    #[test]
+    fn head_byte_mode_skips() {
+        let p = parse_head_args("-c 100");
+        assert!(p.skip);
+    }
+
+    #[test]
+    fn head_long_byte_form_skips() {
+        let p = parse_head_args("--bytes=100");
+        assert!(p.skip);
+    }
+
+    #[test]
+    fn tail_no_args_uses_default() {
+        let p = parse_tail_args("");
+        assert_eq!(p.count, 10);
+        assert!(!p.skip);
+    }
+
+    #[test]
+    fn tail_n_flag_extracts_count() {
+        let p = parse_tail_args("-n 5");
+        assert_eq!(p.count, 5);
+        assert!(!p.skip);
+    }
+
+    #[test]
+    fn tail_short_form_count() {
+        let p = parse_tail_args("-5");
+        assert_eq!(p.count, 5);
+        assert!(!p.skip);
+    }
+
+    #[test]
+    fn tail_byte_mode_skips() {
+        let p = parse_tail_args("-c 50");
+        assert!(p.skip);
+    }
+
+    #[test]
+    fn tail_follow_skips() {
+        let p = parse_tail_args("-f /var/log/x");
+        assert!(p.skip);
+        let p = parse_tail_args("--follow /var/log/x");
+        assert!(p.skip);
+        // -F (continuous follow) too.
+        let p = parse_tail_args("-F /var/log/x");
+        assert!(p.skip);
+    }
+
+    #[test]
+    fn tail_plus_n_form_skips() {
+        // `tail -n +50` shows from line 50 onward — different semantics,
+        // peek-behind doesn't translate. Skip.
+        let p = parse_tail_args("-n +50");
+        assert!(p.skip);
+    }
+
+    #[test]
+    fn tail_plus_short_form_skips() {
+        let p = parse_tail_args("+100");
+        assert!(p.skip);
     }
 }
