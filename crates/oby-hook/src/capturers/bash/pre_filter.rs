@@ -31,6 +31,34 @@ impl PreFilterConfig {
     }
 }
 
+/// Return true when the user's grep args include `-v` / `--invert-match`
+/// in any tokenized form.
+///
+/// Detection is approximate by design — naive whitespace tokenization,
+/// no quote handling. False positives in pathological inputs (`grep -- -v`,
+/// patterns that contain the literal substring `--invert-match`) are
+/// documented as known limitations in `docs/specs/2026-06-09-v0.2.2-design.md`.
+/// The worst-case impact is a missing pre-grep chunk, not a broken rewrite.
+pub fn grep_is_invert_match(args: &str) -> bool {
+    for tok in args.split_whitespace() {
+        if tok == "--invert-match" {
+            return true;
+        }
+        // Short-flag run: starts with single `-`, then ASCII letters only.
+        // The `--` case is handled above; we don't want to misread it as a
+        // short flag.
+        if let Some(rest) = tok.strip_prefix('-') {
+            if !rest.starts_with('-')
+                && rest.chars().all(|c| c.is_ascii_alphabetic())
+                && rest.contains('v')
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn read_env(name: &str) -> usize {
     const DEFAULT: usize = 3;
     const MAX: usize = 1000;
@@ -137,5 +165,56 @@ mod tests {
             let cfg = PreFilterConfig::from_env();
             assert_eq!(cfg.tail_peek, 4);
         });
+    }
+
+    #[test]
+    fn grep_invert_false_for_plain_pattern() {
+        assert!(!grep_is_invert_match("foo"));
+    }
+
+    #[test]
+    fn grep_invert_false_for_other_flags() {
+        assert!(!grep_is_invert_match("-i foo"));
+        assert!(!grep_is_invert_match("-E '^[a-z]+$'"));
+        assert!(!grep_is_invert_match("-rn foo dir/"));
+    }
+
+    #[test]
+    fn grep_invert_true_for_standalone_v() {
+        assert!(grep_is_invert_match("-v foo"));
+    }
+
+    #[test]
+    fn grep_invert_true_for_v_at_end_of_args() {
+        // User-tail position is still detected.
+        assert!(grep_is_invert_match("foo -v"));
+    }
+
+    #[test]
+    fn grep_invert_true_for_combined_short_flags_with_v() {
+        // grep -vi PATTERN, grep -vE PATTERN, grep -vIn PATTERN — all count.
+        assert!(grep_is_invert_match("-vi foo"));
+        assert!(grep_is_invert_match("-vE foo"));
+        assert!(grep_is_invert_match("-vIn foo"));
+        assert!(grep_is_invert_match("-iv foo"));
+    }
+
+    #[test]
+    fn grep_invert_true_for_long_form() {
+        assert!(grep_is_invert_match("--invert-match foo"));
+        assert!(grep_is_invert_match("foo --invert-match"));
+    }
+
+    #[test]
+    fn grep_invert_false_for_other_long_flags() {
+        assert!(!grep_is_invert_match("--color=always foo"));
+        assert!(!grep_is_invert_match("--include='*.rs' foo"));
+    }
+
+    #[test]
+    fn grep_invert_false_for_long_form_substring_in_other_flag() {
+        // --invert-match must be the exact long-form token; partial matches
+        // inside other args don't trigger.
+        assert!(!grep_is_invert_match("--invert-something foo"));
     }
 }
