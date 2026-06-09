@@ -1,3 +1,4 @@
+pub mod pre_filter;
 pub mod rewrite;
 pub mod scanner;
 pub mod shell;
