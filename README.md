@@ -6,7 +6,7 @@ Fittingly, **oby** is what's left of *observability* after the middle bytes get 
 
 ## Status
 
-**v0.2.1.** Bash + Read capturers, complete discard-recovery (`2>/dev/null`, `| grep`, `| head`, `| tail`, `> FILE`, `>> FILE`), execution tracing under both bash (`BASH_XTRACEFD=9`) and zsh (PS4 sentinel + awk demuxer), multi-agent routing, composes with other PreToolUse hooks, mouse + keyboard scrollback, top-style metrics bar. Empirically verified against Claude Code `2.1.x`. Implementation plan: [`docs/plans/v0.2.1.md`](docs/plans/v0.2.1.md). Architecture: [`docs/architecture.md`](docs/architecture.md).
+**v0.2.2.** Bash + Read capturers, complete discard-recovery (`2>/dev/null`, `| grep`, `| head`, `| tail`, `> FILE`, `>> FILE`), execution tracing under both bash (`BASH_XTRACEFD=9`) and zsh (PS4 sentinel + awk demuxer), bounded pre-filter capture (configurable context windows for grep/head/tail — see env vars below), multi-agent routing, composes with other PreToolUse hooks, mouse + keyboard scrollback, top-style metrics bar. Empirically verified against Claude Code `2.1.x`. Implementation plan: [`docs/plans/v0.2.2.md`](docs/plans/v0.2.2.md). Architecture: [`docs/architecture.md`](docs/architecture.md).
 
 ## How it works
 
@@ -111,6 +111,14 @@ agents N · entries N · updates N (M orph) · bytes N · conns N · err A/P · 
 | `OBS_WRAPPER_LOG` | You | Same idea on the wrapper side. Logs every received Entry/Update, agent socket open/close (with bytes), accept errors, parse failures. Off by default. |
 | `OBS_COMPOSE_DELAY_MS` | You | Override the 200ms post-compose sleep `oby-hook` uses to win CC's "last hook to finish wins" race against peer PreToolUse rewriters (rtk etc.). Default 200; set lower if you're confident nothing else is composing on the same matcher. |
 | `OBS_COMPOSING` | `oby-hook` (internal) | Recursion guard. When `oby-hook` invokes a peer hook for composition, this var is set on the child. If `oby-hook` ever sees it on its own startup, it skips composition. Don't set manually. |
+
+**Pre-filter window sizes (v0.2.2+):**
+- `OBS_GREP_BEFORE_LINES` (default `3`) — lines before each grep match in `[stdout-pre-grep]`.
+- `OBS_GREP_AFTER_LINES` (default `3`) — lines after each grep match.
+- `OBS_HEAD_PEEK_LINES` (default `3`) — lines past head's truncation boundary in `[stdout-pre-head]`.
+- `OBS_TAIL_PEEK_LINES` (default `3`) — lines before tail's boundary in `[stdout-pre-tail]`.
+
+Values are clamped to `0..=1000`. Set to `0` to disable a stream's capture window. Read at PreToolUse hook invocation time, so changes take effect for the next command (no need to restart `oby claude`).
 
 ## Coexistence with other PreToolUse hooks
 
