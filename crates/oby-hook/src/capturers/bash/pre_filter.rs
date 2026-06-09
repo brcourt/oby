@@ -1,10 +1,6 @@
 //! Per-filter arg parsing, config, and pipeline building for the
 //! pre-filter tee branches injected by `rewrite::inject_pre_filter_tees`.
 
-// Tasks 1.2–1.4 and 2.1 will use all items in this module; suppress
-// dead-code lints until the wiring is complete.
-#![allow(dead_code)]
-
 /// Window sizes for the pre-filter tee branches. Populated from env vars
 /// at PreToolUse hook invocation time; embedded as literal numbers in
 /// the rewritten command so there's no env-var indirection at shell

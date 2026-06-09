@@ -51,24 +51,24 @@ fn obi_tee_invocation(agent_key: &str, tool_use_id: &str, stream: &str) -> Strin
 }
 
 /// For every pipe segment whose first word is a "discarding filter"
-/// (grep / head / tail), insert a `tee >(oby-tee --stream stdout-pre-<filter>)
-/// |` immediately before that segment. The original filter still consumes
-/// the producer's output; oby-tee gets a parallel copy via process
-/// substitution.
+/// (grep / head / tail), insert a `tee >(<windowing-pipeline> |
+/// oby-tee --stream stdout-pre-<filter>)` immediately before that
+/// segment. The original filter still consumes the producer's output;
+/// the windowing pipeline captures only context lines around what
+/// was discarded.
 ///
-/// Multi-stage pipelines like `cmd | grep | head` get a tee at EACH matching
-/// filter; the chunks land as `stdout-pre-grep` and `stdout-pre-head`.
+/// Each filter's window size is configured via env vars read at hook
+/// invocation time (see `pre_filter::PreFilterConfig::from_env`).
+/// Filters with skip conditions (grep -v, head -c, tail -c/-f/+N)
+/// produce no tee for that segment.
 fn inject_pre_filter_tees(command: &str, agent_key: &str, tool_use_id: &str) -> String {
+    use super::pre_filter::{
+        build_grep_pipeline, build_head_pipeline, build_tail_pipeline, PreFilterConfig,
+    };
     use super::scanner::pipe_segments;
-    const FILTERS: &[(&str, &str)] = &[
-        ("grep", "stdout-pre-grep"),
-        ("head", "stdout-pre-head"),
-        ("tail", "stdout-pre-tail"),
-    ];
 
+    let cfg = PreFilterConfig::from_env();
     let segments = pipe_segments(command);
-    // Collect (insert_at, text) edits; apply right-to-left so positions
-    // don't shift.
     let mut edits: Vec<(usize, String)> = Vec::new();
     for (idx, seg) in segments.iter().enumerate() {
         if idx == 0 {
@@ -76,13 +76,27 @@ fn inject_pre_filter_tees(command: &str, agent_key: &str, tool_use_id: &str) -> 
             continue;
         }
         let first_word = &command[seg.first_word_start..seg.first_word_end];
-        let Some((_, stream)) = FILTERS.iter().find(|(name, _)| *name == first_word) else {
+        // The args are everything after the first word in the segment.
+        let args = command[seg.first_word_end..seg.end].trim();
+        let pipeline = match first_word {
+            "grep" => {
+                let sink = obi_tee_invocation(agent_key, tool_use_id, "stdout-pre-grep");
+                build_grep_pipeline(args, &cfg, &format!("{sink} >/dev/null"))
+            }
+            "head" => {
+                let sink = obi_tee_invocation(agent_key, tool_use_id, "stdout-pre-head");
+                build_head_pipeline(args, &cfg, &format!("{sink} >/dev/null"))
+            }
+            "tail" => {
+                let sink = obi_tee_invocation(agent_key, tool_use_id, "stdout-pre-tail");
+                build_tail_pipeline(args, &cfg, &format!("{sink} >/dev/null"))
+            }
+            _ => continue,
+        };
+        let Some(pipeline) = pipeline else {
             continue;
         };
-        let tee = format!(
-            "tee >({} >/dev/null) | ",
-            obi_tee_invocation(agent_key, tool_use_id, stream),
-        );
+        let tee = format!("tee >({pipeline}) | ");
         edits.push((seg.start, tee));
     }
     apply_inserts(command, edits)
@@ -261,10 +275,8 @@ mod tests {
     fn rewrite_grep_injects_pre_grep_tee() {
         let out = rewrite_with_shell("ls | grep foo", "main", "t1", Shell::Bash).unwrap();
         assert!(
-            out.contains(
-                "tee >(oby-tee --agent 'main' --tool-use-id 't1' --stream 'stdout-pre-grep'"
-            ),
-            "expected stdout-pre-grep tee; got: {out}"
+            out.contains("tee >(grep -B 3 -A 3 foo | oby-tee --agent 'main' --tool-use-id 't1' --stream 'stdout-pre-grep'"),
+            "expected windowed stdout-pre-grep tee; got: {out}"
         );
         // The original | grep stage must still be there.
         assert!(
@@ -278,8 +290,8 @@ mod tests {
         let out =
             rewrite_with_shell("cat /etc/passwd | head -n 5", "main", "t1", Shell::Bash).unwrap();
         assert!(
-            out.contains("--stream 'stdout-pre-head'"),
-            "expected stdout-pre-head tee; got: {out}"
+            out.contains("tee >(tail -n +6 | head -n 3 | oby-tee --agent 'main' --tool-use-id 't1' --stream 'stdout-pre-head'"),
+            "expected windowed stdout-pre-head tee; got: {out}"
         );
         assert!(out.contains("| head -n 5"));
     }
@@ -288,7 +300,10 @@ mod tests {
     fn rewrite_tail_injects_pre_tail_tee() {
         let out =
             rewrite_with_shell("cat /etc/passwd | tail -n 3", "main", "t1", Shell::Bash).unwrap();
-        assert!(out.contains("--stream 'stdout-pre-tail'"));
+        assert!(
+            out.contains("tee >(tail -n 6 | head -n 3 | oby-tee --agent 'main' --tool-use-id 't1' --stream 'stdout-pre-tail'"),
+            "expected windowed stdout-pre-tail tee; got: {out}"
+        );
         assert!(out.contains("| tail -n 3"));
     }
 
@@ -492,5 +507,86 @@ mod tests {
         // But stdout/stderr capture still works (v0.1 baseline).
         assert!(out.contains("--stream 'stdout'"));
         assert!(out.contains("--stream 'stderr'"));
+    }
+
+    #[test]
+    fn rewrite_grep_window_default_includes_b_a() {
+        let out = rewrite_with_shell("cat foo | grep PAT", "main", "t1", Shell::Bash).unwrap();
+        assert!(
+            out.contains("tee >(grep -B 3 -A 3 PAT |"),
+            "windowed grep pipeline missing; got: {out}"
+        );
+        assert!(out.contains("--stream 'stdout-pre-grep'"));
+        // The user's grep is unchanged.
+        assert!(out.contains("| grep PAT"));
+    }
+
+    #[test]
+    fn rewrite_grep_skips_when_invert() {
+        let out = rewrite_with_shell("cat foo | grep -v PAT", "main", "t1", Shell::Bash).unwrap();
+        assert!(
+            !out.contains("--stream 'stdout-pre-grep'"),
+            "pre-grep chunk must NOT be emitted for grep -v; got: {out}"
+        );
+        // The user's grep -v itself still runs.
+        assert!(out.contains("| grep -v PAT"));
+    }
+
+    #[test]
+    fn rewrite_grep_skips_when_combined_short_v() {
+        let out = rewrite_with_shell("cat foo | grep -vi PAT", "main", "t1", Shell::Bash).unwrap();
+        assert!(!out.contains("--stream 'stdout-pre-grep'"));
+    }
+
+    #[test]
+    fn rewrite_head_window_peek_ahead() {
+        let out = rewrite_with_shell("cat foo | head -n 5", "main", "t1", Shell::Bash).unwrap();
+        assert!(
+            out.contains("tee >(tail -n +6 | head -n 3 |"),
+            "windowed head pipeline missing; got: {out}"
+        );
+        assert!(out.contains("--stream 'stdout-pre-head'"));
+        assert!(out.contains("| head -n 5"));
+    }
+
+    #[test]
+    fn rewrite_head_skips_when_byte_mode() {
+        let out = rewrite_with_shell("cat foo | head -c 100", "main", "t1", Shell::Bash).unwrap();
+        assert!(!out.contains("--stream 'stdout-pre-head'"));
+    }
+
+    #[test]
+    fn rewrite_tail_window_peek_behind() {
+        let out = rewrite_with_shell("cat foo | tail -n 5", "main", "t1", Shell::Bash).unwrap();
+        assert!(
+            out.contains("tee >(tail -n 8 | head -n 3 |"),
+            "windowed tail pipeline missing; got: {out}"
+        );
+        assert!(out.contains("--stream 'stdout-pre-tail'"));
+        assert!(out.contains("| tail -n 5"));
+    }
+
+    #[test]
+    fn rewrite_tail_skips_when_follow() {
+        let out =
+            rewrite_with_shell("cat foo | tail -f /var/log/x", "main", "t1", Shell::Bash).unwrap();
+        assert!(!out.contains("--stream 'stdout-pre-tail'"));
+    }
+
+    #[test]
+    fn rewrite_tail_skips_when_plus_n_form() {
+        let out = rewrite_with_shell("cat foo | tail -n +50", "main", "t1", Shell::Bash).unwrap();
+        assert!(!out.contains("--stream 'stdout-pre-tail'"));
+    }
+
+    #[test]
+    fn rewrite_multi_stage_pipeline_windows_each_filter() {
+        // cat | grep | head: both filters windowed independently.
+        let out = rewrite_with_shell("cat foo | grep PAT | head -n 5", "main", "t1", Shell::Bash)
+            .unwrap();
+        assert!(out.contains("tee >(grep -B 3 -A 3 PAT |"));
+        assert!(out.contains("tee >(tail -n +6 | head -n 3 |"));
+        assert!(out.contains("--stream 'stdout-pre-grep'"));
+        assert!(out.contains("--stream 'stdout-pre-head'"));
     }
 }
