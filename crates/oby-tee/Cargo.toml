@@ -10,7 +10,7 @@ keywords = ["claude-code", "observability", "agent", "hook", "tee"]
 categories = ["development-tools", "command-line-utilities"]
 
 [dependencies]
-oby-core = { path = "../oby-core", version = "0.2.1" }
+oby-core = { path = "../oby-core", version = "0.2.2" }
 clap = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
