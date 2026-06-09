@@ -146,6 +146,54 @@ fn parse_common(args: &str, check_follow: bool) -> HeadTailArgs {
     }
 }
 
+/// Build the windowing pipeline for a grep segment. Returns `None` when
+/// the user's grep is `-v` / `--invert-match` (skip pre-filter capture).
+///
+/// `sink_cmd` is the fully-formatted `oby-tee --agent X --tool-use-id Y
+/// --stream stdout-pre-grep >/dev/null` invocation that the rewriter
+/// already builds. We append `| sink_cmd` to the windowing pipeline so
+/// the caller doesn't need to know about it.
+pub fn build_grep_pipeline(args: &str, cfg: &PreFilterConfig, sink_cmd: &str) -> Option<String> {
+    if grep_is_invert_match(args) {
+        return None;
+    }
+    Some(format!(
+        "grep -B {} -A {} {} | {}",
+        cfg.grep_before, cfg.grep_after, args, sink_cmd
+    ))
+}
+
+/// Build the peek-ahead pipeline for a head segment. Returns `None` for
+/// byte-mode head (line peek doesn't apply).
+pub fn build_head_pipeline(args: &str, cfg: &PreFilterConfig, sink_cmd: &str) -> Option<String> {
+    let p = parse_head_args(args);
+    if p.skip {
+        return None;
+    }
+    // Lines (count + 1) through (count + head_peek): skip the first
+    // `count` via `tail -n +<count+1>`, then take `head_peek` via head.
+    let start = p.count.saturating_add(1);
+    Some(format!(
+        "tail -n +{} | head -n {} | {}",
+        start, cfg.head_peek, sink_cmd
+    ))
+}
+
+/// Build the peek-behind pipeline for a tail segment. Returns `None` for
+/// byte-mode, follow-mode, or `+N` from-line-N tail.
+pub fn build_tail_pipeline(args: &str, cfg: &PreFilterConfig, sink_cmd: &str) -> Option<String> {
+    let p = parse_tail_args(args);
+    if p.skip {
+        return None;
+    }
+    // Last (count + tail_peek) lines, then take the first `tail_peek`.
+    let captured = p.count.saturating_add(cfg.tail_peek);
+    Some(format!(
+        "tail -n {} | head -n {} | {}",
+        captured, cfg.tail_peek, sink_cmd
+    ))
+}
+
 fn read_env(name: &str) -> usize {
     const DEFAULT: usize = 3;
     const MAX: usize = 1000;
@@ -400,5 +448,160 @@ mod tests {
     fn tail_plus_short_form_skips() {
         let p = parse_tail_args("+100");
         assert!(p.skip);
+    }
+
+    #[test]
+    fn build_grep_pipeline_emits_b_a_with_args() {
+        let cfg = PreFilterConfig {
+            grep_before: 3,
+            grep_after: 3,
+            head_peek: 3,
+            tail_peek: 3,
+        };
+        let p = build_grep_pipeline("foo", &cfg, "SINK_CMD").unwrap();
+        assert!(p.contains("grep -B 3 -A 3 foo"), "got: {p}");
+        assert!(p.ends_with("| SINK_CMD"), "got: {p}");
+    }
+
+    #[test]
+    fn build_grep_pipeline_custom_counts() {
+        let cfg = PreFilterConfig {
+            grep_before: 7,
+            grep_after: 2,
+            head_peek: 0,
+            tail_peek: 0,
+        };
+        let p = build_grep_pipeline("-i foo", &cfg, "SINK").unwrap();
+        assert!(p.contains("grep -B 7 -A 2 -i foo"), "got: {p}");
+    }
+
+    #[test]
+    fn build_grep_pipeline_none_when_invert() {
+        let cfg = PreFilterConfig {
+            grep_before: 3,
+            grep_after: 3,
+            head_peek: 3,
+            tail_peek: 3,
+        };
+        assert!(build_grep_pipeline("-v foo", &cfg, "SINK").is_none());
+        assert!(build_grep_pipeline("--invert-match foo", &cfg, "SINK").is_none());
+        assert!(build_grep_pipeline("-vi foo", &cfg, "SINK").is_none());
+    }
+
+    #[test]
+    fn build_head_pipeline_peek_ahead() {
+        let cfg = PreFilterConfig {
+            grep_before: 0,
+            grep_after: 0,
+            head_peek: 3,
+            tail_peek: 0,
+        };
+        // head -n 5 → skip 5 lines, take 3.
+        let p = build_head_pipeline("-n 5", &cfg, "SINK").unwrap();
+        assert!(p.contains("tail -n +6"), "got: {p}");
+        assert!(p.contains("head -n 3"), "got: {p}");
+        assert!(p.ends_with("| SINK"), "got: {p}");
+    }
+
+    #[test]
+    fn build_head_pipeline_default_count() {
+        let cfg = PreFilterConfig {
+            grep_before: 0,
+            grep_after: 0,
+            head_peek: 3,
+            tail_peek: 0,
+        };
+        // head with no args defaults to count=10; peek-ahead starts at line 11.
+        let p = build_head_pipeline("", &cfg, "SINK").unwrap();
+        assert!(p.contains("tail -n +11"), "got: {p}");
+        assert!(p.contains("head -n 3"));
+    }
+
+    #[test]
+    fn build_head_pipeline_short_form() {
+        let cfg = PreFilterConfig {
+            grep_before: 0,
+            grep_after: 0,
+            head_peek: 5,
+            tail_peek: 0,
+        };
+        let p = build_head_pipeline("-3 file.txt", &cfg, "SINK").unwrap();
+        assert!(p.contains("tail -n +4"), "got: {p}");
+        assert!(p.contains("head -n 5"));
+    }
+
+    #[test]
+    fn build_head_pipeline_none_when_byte_mode() {
+        let cfg = PreFilterConfig {
+            grep_before: 0,
+            grep_after: 0,
+            head_peek: 3,
+            tail_peek: 0,
+        };
+        assert!(build_head_pipeline("-c 100", &cfg, "SINK").is_none());
+    }
+
+    #[test]
+    fn build_tail_pipeline_peek_behind() {
+        let cfg = PreFilterConfig {
+            grep_before: 0,
+            grep_after: 0,
+            head_peek: 0,
+            tail_peek: 3,
+        };
+        // tail -n 5 → tail -n (5+3)=8 | head -n 3
+        let p = build_tail_pipeline("-n 5", &cfg, "SINK").unwrap();
+        assert!(p.contains("tail -n 8"), "got: {p}");
+        assert!(p.contains("head -n 3"));
+        assert!(p.ends_with("| SINK"));
+    }
+
+    #[test]
+    fn build_tail_pipeline_default_count() {
+        let cfg = PreFilterConfig {
+            grep_before: 0,
+            grep_after: 0,
+            head_peek: 0,
+            tail_peek: 4,
+        };
+        // tail default count = 10, peek = 4: tail -n 14 | head -n 4
+        let p = build_tail_pipeline("", &cfg, "SINK").unwrap();
+        assert!(p.contains("tail -n 14"), "got: {p}");
+        assert!(p.contains("head -n 4"));
+    }
+
+    #[test]
+    fn build_tail_pipeline_none_when_follow() {
+        let cfg = PreFilterConfig {
+            grep_before: 0,
+            grep_after: 0,
+            head_peek: 0,
+            tail_peek: 3,
+        };
+        assert!(build_tail_pipeline("-f /var/log/x", &cfg, "SINK").is_none());
+        assert!(build_tail_pipeline("-F /var/log/x", &cfg, "SINK").is_none());
+    }
+
+    #[test]
+    fn build_tail_pipeline_none_when_plus_n() {
+        let cfg = PreFilterConfig {
+            grep_before: 0,
+            grep_after: 0,
+            head_peek: 0,
+            tail_peek: 3,
+        };
+        assert!(build_tail_pipeline("-n +50", &cfg, "SINK").is_none());
+        assert!(build_tail_pipeline("+100", &cfg, "SINK").is_none());
+    }
+
+    #[test]
+    fn build_tail_pipeline_none_when_byte_mode() {
+        let cfg = PreFilterConfig {
+            grep_before: 0,
+            grep_after: 0,
+            head_peek: 0,
+            tail_peek: 3,
+        };
+        assert!(build_tail_pipeline("-c 50", &cfg, "SINK").is_none());
     }
 }
